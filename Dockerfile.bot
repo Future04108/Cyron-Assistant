@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
-COPY requirements-bot.txt .
+# Copy both base and bot requirements so nested -r works
+COPY requirements.txt requirements-bot.txt ./
 RUN pip install --no-cache-dir -r requirements-bot.txt
 
 # Copy bot code
