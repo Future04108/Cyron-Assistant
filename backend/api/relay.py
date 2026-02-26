@@ -118,5 +118,12 @@ async def relay_message(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("relay_error", error=str(e), guild_id=guild_id, channel_id=channel_id)
+        logger.error(
+            "relay_error",
+            error=str(e),
+            guild_id=guild_id,
+            channel_id=channel_id,
+            user_id=payload.user_id,
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from e
+

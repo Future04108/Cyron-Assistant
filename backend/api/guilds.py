@@ -31,7 +31,17 @@ async def get_or_create_guild(
 
     guild = await upsert_guild(session, gid)
     logger.info("guild_get_or_create", guild_id=gid, plan=guild.plan)
-    return GuildResponse.model_validate(guild)
+    return GuildResponse(
+        id=guild.id,
+        name=guild.name,
+        plan=guild.plan,
+        monthly_tokens_used=guild.monthly_tokens_used,
+        daily_ticket_count=guild.daily_ticket_count,
+        concurrent_ai_sessions=guild.concurrent_ai_sessions,
+        last_daily_reset=guild.last_daily_reset,
+        last_monthly_reset=guild.last_monthly_reset,
+        system_prompt=guild.system_prompt,
+    )
 
 
 @router.patch("/guilds/{guild_id}", response_model=GuildResponse)
@@ -67,5 +77,17 @@ async def update_guild(
         guild.system_prompt = body.system_prompt
 
     logger.info("guild_updated", guild_id=gid, plan=guild.plan)
-    return GuildResponse.model_validate(guild)
+    return GuildResponse(
+        id=guild.id,
+        name=guild.name,
+        plan=guild.plan,
+        monthly_tokens_used=guild.monthly_tokens_used,
+        daily_ticket_count=guild.daily_ticket_count,
+        concurrent_ai_sessions=guild.concurrent_ai_sessions,
+        last_daily_reset=guild.last_daily_reset,
+        last_monthly_reset=guild.last_monthly_reset,
+        system_prompt=guild.system_prompt,
+    )
+
+
 
