@@ -20,8 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from backend.config import config
 from backend.api import health, relay, knowledge, usage, guilds
-from backend.db.session import async_session_factory, engine
-from backend.services.reset_service import run_daily_reset, run_monthly_reset
+from backend.db.session import async_session_factory, engine, init_db
 
 # Structlog configuration
 structlog.configure(
@@ -58,14 +57,14 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     log.info("redis_connected")
 
-    # Run Alembic migrations
+    # Ensure database schema exists (Phase 2: use SQLAlchemy metadata)
+    # Alembic migrations can still be run manually if needed.
     try:
-        alembic_cfg = Config("alembic.ini")
-        alembic_cfg.set_main_option("script_location", "alembic")
-        command.upgrade(alembic_cfg, "head")
-        log.info("migrations_applied")
+        await init_db()
+        log.info("db_initialized")
     except Exception as e:
-        log.warning("migrations_skip", error=str(e))
+        log.error("db_init_failed", error=str(e))
+        raise
 
     # Scheduler for daily/monthly resets
     scheduler = AsyncIOScheduler()

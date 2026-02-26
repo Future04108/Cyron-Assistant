@@ -27,4 +27,9 @@ class RelayResponse(BaseModel):
 
     status: str = Field(..., description="ok | limit_exceeded | error")
     reply: str = Field(..., description="AI response message")
-    prompt_context: PromptContext | None = Field(None, description="Built prompt context")
+    prompt_context: PromptContext | None = Field(
+        None, description="Built prompt context"
+    )
+    concurrent_now: int | None = Field(
+        None, description="Current concurrent AI sessions for this guild"
+    )

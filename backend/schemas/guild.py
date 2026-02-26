@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class GuildResponse(BaseModel):
@@ -18,8 +18,7 @@ class GuildResponse(BaseModel):
     last_monthly_reset: datetime | None
     system_prompt: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class GuildUpdate(BaseModel):

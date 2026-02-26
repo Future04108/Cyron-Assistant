@@ -24,18 +24,25 @@ def _redis_key_monthly_tokens(guild_id: int) -> str:
     return f"guild:{guild_id}:monthly_tokens"
 
 
-async def check_and_incr_concurrent(redis: Redis, guild_id: int, plan: str) -> tuple[bool, str]:
+async def check_and_incr_concurrent(
+    redis: Redis, guild_id: int, plan: str
+) -> tuple[bool, str, int]:
     """
     Check concurrent limit and increment if OK.
-    Returns (allowed, rejection_message).
+    Returns (allowed, rejection_message, current_concurrent).
     """
     limits = _get_limits(plan)
     key = _redis_key_concurrent(guild_id)
     current = await redis.incr(key)
     if current > limits["concurrent_tickets"]:
         await redis.decr(key)
-        return False, "Concurrent ticket limit reached. Please wait for existing tickets to complete."
-    return True, ""
+        return (
+            False,
+            "Concurrent AI ticket limit reached for "
+            f"{plan.capitalize()} plan. Please wait for existing tickets to complete.",
+            limits["concurrent_tickets"],
+        )
+    return True, "", int(current)
 
 
 async def decr_concurrent(redis: Redis, guild_id: int) -> None:
