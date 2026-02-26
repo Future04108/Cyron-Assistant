@@ -30,3 +30,4 @@ class GuildUpdate(BaseModel):
     )
     system_prompt: str | None = None
 
+

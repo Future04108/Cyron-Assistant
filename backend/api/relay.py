@@ -158,3 +158,4 @@ async def relay_message(
             user_id=payload.user_id,
         )
         raise HTTPException(status_code=500, detail="Internal server error") from e
+
