@@ -1,6 +1,7 @@
 """Knowledge CRUD API - /guilds/{guild_id}/knowledge."""
 
 from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +9,9 @@ from backend.db.session import get_session
 from backend.schemas.knowledge import KnowledgeCreate, KnowledgeUpdate, KnowledgeResponse
 from backend.services.guild_service import get_guild
 from backend.services.knowledge_service import (
-    create_knowledge,
+    GuildTotalLimitError,
+    EntryTooLargeError,
+    create_knowledge_with_chunking,
     get_knowledge_by_id,
     list_knowledge,
     update_knowledge,
@@ -47,19 +50,22 @@ async def create_guild_knowledge(
     body: KnowledgeCreate,
     session: AsyncSession = Depends(get_session),
 ):
-    """Create knowledge entry. Fails if plan limit exceeded."""
+    """Create knowledge entry with validation and chunking."""
     guild = await get_guild(session, guild_id)
     if not guild:
         raise HTTPException(status_code=404, detail="Guild not found")
 
-    knowledge = await create_knowledge(
-        session, guild_id, body.title, body.content, plan=guild.plan
-    )
-    if not knowledge:
-        raise HTTPException(
-            status_code=403,
-            detail="Knowledge entry limit exceeded for your plan. Please upgrade.",
+    try:
+        created = await create_knowledge_with_chunking(
+            session, guild_id, body.title, body.content, plan=guild.plan
         )
+    except EntryTooLargeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except GuildTotalLimitError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    # Return first created chunk as representative
+    knowledge = created[0]
     return KnowledgeResponse(
         id=knowledge.id,
         guild_id=knowledge.guild_id,
@@ -99,14 +105,20 @@ async def update_guild_knowledge(
     body: KnowledgeUpdate,
     session: AsyncSession = Depends(get_session),
 ):
-    """Update knowledge entry."""
+    """Update knowledge entry with validation."""
     guild = await get_guild(session, guild_id)
     if not guild:
         raise HTTPException(status_code=404, detail="Guild not found")
 
-    knowledge = await update_knowledge(
-        session, knowledge_id, guild_id, title=body.title, content=body.content
-    )
+    try:
+        knowledge = await update_knowledge(
+            session, knowledge_id, guild_id, title=body.title, content=body.content
+        )
+    except EntryTooLargeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except GuildTotalLimitError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
     if not knowledge:
         raise HTTPException(status_code=404, detail="Knowledge not found")
     return KnowledgeResponse(

@@ -33,3 +33,12 @@ class RelayResponse(BaseModel):
     concurrent_now: int | None = Field(
         None, description="Current concurrent AI sessions for this guild"
     )
+    low_confidence: bool | None = Field(
+        None, description="True if retrieval confidence is low"
+    )
+    injected_knowledge_chars: int | None = Field(
+        None, description="Total characters of injected knowledge"
+    )
+    top_similarity: float | None = Field(
+        None, description="Top cosine similarity score for retrieved knowledge"
+    )

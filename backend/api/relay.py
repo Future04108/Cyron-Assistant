@@ -100,8 +100,8 @@ async def relay_message(
             await session.flush()
 
             # 6. Build prompt context (system prompt + knowledge + history)
-            knowledge_items = await search_knowledge(
-                session, guild_id, payload.content, top_k=3, plan=guild.plan
+            knowledge_items, top_similarity = await search_knowledge(
+                session, guild_id, payload.content, top_k=4, min_score=0.65
             )
             last_msgs = await get_last_messages(session, ticket.id, limit=8)
             knowledge_chunks = [
@@ -110,11 +110,13 @@ async def relay_message(
             message_history = [
                 {"role": m.role, "content": m.content} for m in last_msgs
             ]
-            prompt_context = build_prompt_context(
+            built = build_prompt_context(
                 guild.system_prompt or "",
                 knowledge_chunks,
                 message_history,
+                top_similarity=top_similarity,
             )
+            prompt_context = built["prompt_context"]
 
             # 7. Phase 2 placeholder reply (no AI yet)
             reply = "AI is thinking... (Phase 2 ready for AI)"
@@ -136,6 +138,9 @@ async def relay_message(
                 channel_id=channel_id,
                 plan=guild.plan,
                 knowledge_count=len(knowledge_items),
+                top_similarity=top_similarity,
+                injected_knowledge_chars=built["injected_knowledge_chars"],
+                low_confidence=built["low_confidence"],
                 concurrent_now=current_concurrent,
             )
 
@@ -144,6 +149,9 @@ async def relay_message(
                 reply=reply,
                 prompt_context=prompt_context,
                 concurrent_now=current_concurrent,
+                low_confidence=built["low_confidence"],
+                injected_knowledge_chars=built["injected_knowledge_chars"],
+                top_similarity=built["top_similarity"],
             )
         finally:
             await decr_concurrent(redis, guild_id)
