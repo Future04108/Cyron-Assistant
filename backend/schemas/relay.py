@@ -22,6 +22,13 @@ class PromptContext(BaseModel):
     message_history: list[dict[str, str]] = Field(default_factory=list)
 
 
+class TokenUsage(BaseModel):
+    """Token usage details for an AI call."""
+
+    input: int = Field(..., description="Prompt/input tokens")
+    output: int = Field(..., description="Completion/output tokens")
+
+
 class RelayResponse(BaseModel):
     """Response payload for message relay."""
 
@@ -41,4 +48,7 @@ class RelayResponse(BaseModel):
     )
     top_similarity: float | None = Field(
         None, description="Top cosine similarity score for retrieved knowledge"
+    )
+    token_usage: TokenUsage | None = Field(
+        None, description="Token usage for this AI call"
     )

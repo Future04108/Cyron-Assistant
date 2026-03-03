@@ -23,6 +23,13 @@ class BackendConfig:
             "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_ticket_assistant",
         )
         self.redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        # AI provider configuration (Phase 3)
+        self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
+        self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.openai_max_tokens: int = int(os.getenv("OPENAI_MAX_TOKENS", "400"))
+        self.openai_temperature: float = float(
+            os.getenv("OPENAI_TEMPERATURE", "0.2")
+        )
 
 
 # Global config instance

@@ -17,6 +17,7 @@ from backend.services.limit_service import (
     check_monthly_tokens,
 )
 from backend.config import MIN_SIMILARITY_THRESHOLD
+from backend.services.ai_service import AIServiceError, get_ai_response
 from backend.services.knowledge_service import search_knowledge
 from backend.services.message_service import add_message, get_last_messages
 from backend.services.prompt_builder import build_prompt_context
@@ -102,7 +103,11 @@ async def relay_message(
 
             # 6. Build prompt context (system prompt + knowledge + history)
             knowledge_items, top_similarity = await search_knowledge(
-                session, guild_id, payload.content, top_k=4, min_score=MIN_SIMILARITY_THRESHOLD
+                session,
+                guild_id,
+                payload.content,
+                top_k=4,
+                min_score=MIN_SIMILARITY_THRESHOLD,
             )
             last_msgs = await get_last_messages(session, ticket.id, limit=8)
             knowledge_chunks = [
@@ -119,18 +124,42 @@ async def relay_message(
             )
             prompt_context = built["prompt_context"]
 
-            # 7. Phase 2 placeholder reply (no AI yet)
-            reply = "AI is thinking... (Phase 2 ready for AI)"
+            # 7. Call AI model via LiteLLM
+            prompt_tokens = 0
+            completion_tokens = 0
+            try:
+                reply, prompt_tokens, completion_tokens = await get_ai_response(
+                    prompt_context, max_tokens=400
+                )
+            except AIServiceError as e:
+                logger.error(
+                    "ai_call_failed",
+                    error=str(e),
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                )
+                reply = "AI is temporarily unavailable — support will reply soon."
+                prompt_tokens = 0
+                completion_tokens = 0
+
+            # Append conditional suggestion only when low confidence
+            if built["low_confidence"]:
+                reply += (
+                    "\n\nNeed more details? Click 'View Full Details' or ask support."
+                )
+
+            # 8. Store assistant reply
             await add_message(session, ticket.id, "assistant", reply)
             await session.flush()
 
-            # 8. Usage logging (tokens_used=0 for now)
+            # 9. Usage logging with real token counts
+            total_tokens = int(prompt_tokens) + int(completion_tokens)
             await log_usage(
                 session=session,
                 redis=redis,
                 guild_id=guild_id,
-                tokens_used=0,
-                request_type="relay",
+                tokens_used=total_tokens,
+                request_type="ai_response",
             )
 
             logger.info(
@@ -142,6 +171,9 @@ async def relay_message(
                 top_similarity=top_similarity,
                 injected_knowledge_chars=built["injected_knowledge_chars"],
                 low_confidence=built["low_confidence"],
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 concurrent_now=current_concurrent,
             )
 
@@ -153,6 +185,10 @@ async def relay_message(
                 low_confidence=built["low_confidence"],
                 injected_knowledge_chars=built["injected_knowledge_chars"],
                 top_similarity=built["top_similarity"],
+                token_usage={
+                    "input": int(prompt_tokens),
+                    "output": int(completion_tokens),
+                },
             )
         finally:
             await decr_concurrent(redis, guild_id)
