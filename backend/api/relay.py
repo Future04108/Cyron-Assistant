@@ -142,11 +142,7 @@ async def relay_message(
                 prompt_tokens = 0
                 completion_tokens = 0
 
-            # Append conditional suggestion only when low confidence
-            if built["low_confidence"]:
-                reply += (
-                    "\n\nNeed more details? Click 'View Full Details' or ask support."
-                )
+            # Low-confidence suggestion is shown in Discord embed footer by the bot
 
             # 8. Store assistant reply
             await add_message(session, ticket.id, "assistant", reply)
@@ -189,6 +185,7 @@ async def relay_message(
                     "input": int(prompt_tokens),
                     "output": int(completion_tokens),
                 },
+                embed_color=guild.embed_color or "#00b4ff",
             )
         finally:
             await decr_concurrent(redis, guild_id)

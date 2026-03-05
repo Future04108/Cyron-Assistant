@@ -35,6 +35,24 @@ class BackendClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def get_guild(self, guild_id: str) -> dict[str, Any] | None:
+        """
+        Fetch guild settings from the backend (e.g. embed_color for ticket UI).
+
+        Returns:
+            Guild dict with embed_color, plan, etc., or None if request fails.
+        """
+        url = f"{self.base_url}/guilds/{guild_id}"
+        session = await self._get_session()
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                return None
+        except Exception as e:
+            logger.warning(f"Failed to fetch guild {guild_id}: {e}")
+            return None
+
     async def relay_message(
         self,
         guild_id: str,

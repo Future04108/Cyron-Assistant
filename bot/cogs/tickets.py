@@ -4,7 +4,14 @@ import logging
 import discord
 from discord import app_commands, ChannelType, PermissionOverwrite
 from discord.ext import commands
+
+from bot.utils.embed_builder import create_reply_embed
 from bot.utils.http_client import get_client
+from bot.views.ticket_view import (
+    build_ticket_embed,
+    handle_ticket_interaction,
+    TicketView,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +112,23 @@ class TicketsCog(commands.Cog):
                 f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True
             )
 
-            # Send welcome message in ticket channel
-            await ticket_channel.send(
-                f"👋 Hello {interaction.user.mention}! This is your support ticket.\n"
-                f"Please describe your issue and I'll help you as soon as possible.\n"
-                f"Type `/close-ticket` to close this ticket when you're done."
+            # Fetch guild settings (embed_color) from backend
+            embed_color = "#00b4ff"
+            try:
+                guild_data = await self.client.get_guild(str(interaction.guild.id))
+                if guild_data and guild_data.get("embed_color"):
+                    embed_color = guild_data["embed_color"]
+            except Exception as e:
+                logger.debug("Could not fetch guild embed_color: %s", e)
+
+            # Send premium welcome embed + persistent view
+            embed = build_ticket_embed(
+                embed_color=embed_color,
+                created_by=interaction.user,
+                channel_id=ticket_channel.id,
             )
+            view = TicketView(ticket_channel.id, timeout=None)
+            await ticket_channel.send(embed=embed, view=view)
 
             logger.info(
                 f"Created ticket channel {ticket_channel.id} for user {user_id} "
@@ -124,6 +142,13 @@ class TicketsCog(commands.Cog):
                 "Please check bot permissions.",
                 ephemeral=True,
             )
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Route ticket panel button clicks (persistent across restarts via custom_id)."""
+        handled = await handle_ticket_interaction(interaction, self.bot)
+        if handled:
+            return
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -164,9 +189,16 @@ class TicketsCog(commands.Cog):
                 message_id=str(message.id),
             )
 
-            # Send response back to channel
+            # Send response as rich embed with guild.embed_color
             reply_text = response_data.get("reply", "AI is thinking...")
-            await message.channel.send(reply_text)
+            embed_color = response_data.get("embed_color") or "#00b4ff"
+            low_confidence = response_data.get("low_confidence") is True
+            embed = create_reply_embed(
+                reply_text,
+                embed_color=embed_color,
+                low_confidence=low_confidence,
+            )
+            await message.channel.send(embed=embed)
 
             logger.debug(
                 f"Successfully relayed and responded to message in "
@@ -178,14 +210,15 @@ class TicketsCog(commands.Cog):
                 f"Error relaying message from channel {message.channel.id}: {e}",
                 exc_info=True,
             )
-            # Send user-friendly error message
+            # Send fallback as rich embed (use default color; guild may be unknown)
             try:
-                await message.channel.send(
-                    "⚠️ Sorry, I'm having trouble processing your message right now. "
-                    "Please try again in a moment."
+                fallback_embed = create_reply_embed(
+                    "Sorry, I'm having trouble processing your message right now. "
+                    "Please try again in a moment.",
+                    title="Temporarily Unavailable",
                 )
+                await message.channel.send(embed=fallback_embed)
             except Exception:
-                # If we can't send error message, just log it
                 logger.error("Failed to send error message to channel")
 
 

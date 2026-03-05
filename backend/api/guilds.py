@@ -41,6 +41,7 @@ async def get_or_create_guild(
         last_daily_reset=guild.last_daily_reset,
         last_monthly_reset=guild.last_monthly_reset,
         system_prompt=guild.system_prompt,
+        embed_color=guild.embed_color or "#00b4ff",
     )
 
 
@@ -76,6 +77,14 @@ async def update_guild(
     if body.system_prompt is not None:
         guild.system_prompt = body.system_prompt
 
+    if body.embed_color is not None:
+        if guild.plan.lower() not in ("pro", "business"):
+            raise HTTPException(
+                status_code=403,
+                detail="Embed color customization is available for Pro and Business plans only.",
+            )
+        guild.embed_color = body.embed_color
+
     logger.info("guild_updated", guild_id=gid, plan=guild.plan)
     return GuildResponse(
         id=guild.id,
@@ -87,4 +96,5 @@ async def update_guild(
         last_daily_reset=guild.last_daily_reset,
         last_monthly_reset=guild.last_monthly_reset,
         system_prompt=guild.system_prompt,
+        embed_color=guild.embed_color or "#00b4ff",
     )

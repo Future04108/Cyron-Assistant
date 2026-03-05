@@ -26,6 +26,7 @@ import discord
 from discord.ext import commands
 from bot.config import config
 from bot.cogs import setup, tickets
+from bot.utils.embed_builder import create_ticket_embed
 from bot.utils.http_client import get_client
 
 # Configure logging
@@ -73,8 +74,31 @@ class AITicketBot(commands.Bot):
             logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        """Called when the bot joins a new guild."""
+        """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
+        try:
+            embed = create_ticket_embed(
+                title="AI Ticket Assistant",
+                description=(
+                    "Thanks for adding me! I provide AI-powered support in ticket channels.\n\n"
+                    "**Getting started:**\n"
+                    "1. Run `/setup` to create the Tickets category and Support role.\n"
+                    "2. Run `/create-ticket` to open a support ticket.\n"
+                    "3. Send messages in the ticket channel — I'll reply with AI assistance."
+                ),
+                color="#00b4ff",
+                footer="Use /setup then /create-ticket to begin.",
+            )
+            channel = guild.system_channel
+            if channel is None:
+                for ch in guild.text_channels:
+                    if ch.permissions_for(guild.me).send_messages:
+                        channel = ch
+                        break
+            if channel:
+                await channel.send(embed=embed)
+        except Exception as e:
+            logger.warning("Could not send welcome embed to guild %s: %s", guild.id, e)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Called when the bot leaves a guild."""

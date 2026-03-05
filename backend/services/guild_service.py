@@ -22,6 +22,7 @@ async def upsert_guild(
             name=name,
             plan="free",
             system_prompt=DEFAULT_SYSTEM_PROMPT,
+            embed_color="#00b4ff",
         )
         session.add(guild)
         await session.flush()

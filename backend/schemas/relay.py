@@ -52,3 +52,6 @@ class RelayResponse(BaseModel):
     token_usage: TokenUsage | None = Field(
         None, description="Token usage for this AI call"
     )
+    embed_color: str | None = Field(
+        None, description="Guild embed color (hex) for Discord reply embeds"
+    )

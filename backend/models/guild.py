@@ -24,6 +24,9 @@ class Guild(Base):
         DateTime(timezone=True), nullable=True
     )
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    embed_color: Mapped[str | None] = mapped_column(
+        String(7), nullable=True, default="#00b4ff"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
