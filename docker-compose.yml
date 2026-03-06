@@ -45,6 +45,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - HOST=0.0.0.0
       - PORT=8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
       # Must match POSTGRES_PASSWORD used by postgres service (from .env or default).
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_ticket_assistant
       - REDIS_URL=redis://redis:6379/0
