@@ -1,4 +1,4 @@
-version: '3.8'
+# version is obsolete in Compose V2; omit it to avoid warnings.
 
 services:
   postgres:
@@ -7,7 +7,8 @@ services:
     environment:
       POSTGRES_DB: ai_ticket_assistant
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # Use POSTGRES_PASSWORD from .env or default "postgres". API must use the same.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -44,7 +45,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - HOST=0.0.0.0
       - PORT=8000
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/ai_ticket_assistant
+      # Must match POSTGRES_PASSWORD used by postgres service (from .env or default).
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_ticket_assistant
       - REDIS_URL=redis://redis:6379/0
     ports:
       - "8000:8000"
