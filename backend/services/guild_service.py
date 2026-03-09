@@ -33,3 +33,9 @@ async def get_guild(session: AsyncSession, guild_id: int) -> Guild | None:
     """Get guild by ID."""
     result = await session.execute(select(Guild).where(Guild.id == guild_id))
     return result.scalar_one_or_none()
+
+
+async def list_guilds(session: AsyncSession) -> list[Guild]:
+    """Return all guilds known to the system."""
+    result = await session.execute(select(Guild))
+    return list(result.scalars().all())

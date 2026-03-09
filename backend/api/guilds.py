@@ -7,10 +7,37 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.session import get_session
 from backend.schemas.guild import GuildResponse, GuildUpdate
 from backend.schemas.plans import PLAN_LIMITS
-from backend.services.guild_service import get_guild, upsert_guild
+from backend.services.guild_service import get_guild, list_guilds, upsert_guild
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["guilds"])
+
+
+@router.get("/guilds", response_model=list[GuildResponse])
+async def get_all_guilds(
+    session: AsyncSession = Depends(get_session),
+) -> list[GuildResponse]:
+    """Return all guilds known to the backend.
+
+    For now this is not filtered by user; it simply returns every guild that
+    has been seen by the bot/backend. This is sufficient for the MVP dashboard.
+    """
+    guilds = await list_guilds(session)
+    return [
+        GuildResponse(
+            id=g.id,
+            name=g.name,
+            plan=g.plan,
+            monthly_tokens_used=g.monthly_tokens_used,
+            daily_ticket_count=g.daily_ticket_count,
+            concurrent_ai_sessions=g.concurrent_ai_sessions,
+            last_daily_reset=g.last_daily_reset,
+            last_monthly_reset=g.last_monthly_reset,
+            system_prompt=g.system_prompt,
+            embed_color=g.embed_color or "#00b4ff",
+        )
+        for g in guilds
+    ]
 
 
 @router.get("/guilds/{guild_id}", response_model=GuildResponse)
