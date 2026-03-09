@@ -21,6 +21,7 @@ from apscheduler.triggers.cron import CronTrigger
 from backend.config import config
 from backend.api import health, relay, knowledge, usage, guilds, auth
 from backend.db.session import async_session_factory, engine, init_db
+from backend.services.reset_service import run_daily_reset, run_monthly_reset
 
 # Structlog configuration
 structlog.configure(
