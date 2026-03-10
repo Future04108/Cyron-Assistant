@@ -32,6 +32,9 @@ async def get_all_guilds(
     guilds = await list_guilds(session)
     responses: list[GuildResponse] = []
     for g in guilds:
+        # Skip placeholder/internal guilds that don't have a human-readable name
+        if not (g.name or "").strip():
+            continue
         icon_url = await redis.get(_icon_key(g.id))
         responses.append(
             GuildResponse(
