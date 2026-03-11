@@ -5,7 +5,6 @@ import discord
 from discord import app_commands, ChannelType, PermissionOverwrite
 from discord.ext import commands
 
-from bot.utils.embed_builder import create_reply_embed
 from bot.utils.http_client import get_client
 from bot.views.ticket_view import (
     build_ticket_embed,
@@ -180,25 +179,19 @@ class TicketsCog(commands.Cog):
                 f"from user {message.author.id}"
             )
 
-            # Relay message to backend
-            response_data = await self.client.relay_message(
-                guild_id=str(message.guild.id),
-                channel_id=str(message.channel.id),
-                user_id=str(message.author.id),
-                content=message.content,
-                message_id=str(message.id),
-            )
+            # Show "Cyron Assistant is typing..." while waiting for the backend
+            async with message.channel.typing():
+                response_data = await self.client.relay_message(
+                    guild_id=str(message.guild.id),
+                    channel_id=str(message.channel.id),
+                    user_id=str(message.author.id),
+                    content=message.content,
+                    message_id=str(message.id),
+                )
 
-            # Send response as rich embed with guild.embed_color
+            # Send response as plain text (like a normal user message)
             reply_text = response_data.get("reply", "AI is thinking...")
-            embed_color = response_data.get("embed_color") or "#00b4ff"
-            low_confidence = response_data.get("low_confidence") is True
-            embed = create_reply_embed(
-                reply_text,
-                embed_color=embed_color,
-                low_confidence=low_confidence,
-            )
-            await message.channel.send(embed=embed)
+            await message.channel.send(reply_text)
 
             logger.debug(
                 f"Successfully relayed and responded to message in "
@@ -210,14 +203,11 @@ class TicketsCog(commands.Cog):
                 f"Error relaying message from channel {message.channel.id}: {e}",
                 exc_info=True,
             )
-            # Send fallback as rich embed (use default color; guild may be unknown)
             try:
-                fallback_embed = create_reply_embed(
+                await message.channel.send(
                     "Sorry, I'm having trouble processing your message right now. "
-                    "Please try again in a moment.",
-                    title="Temporarily Unavailable",
+                    "Please try again in a moment."
                 )
-                await message.channel.send(embed=fallback_embed)
             except Exception:
                 logger.error("Failed to send error message to channel")
 

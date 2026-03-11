@@ -6,8 +6,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Minimum cosine similarity for knowledge retrieval (low_confidence if below this).
-# Tune lower to capture short semantic matches (e.g. 0.57 for "support hours" style queries).
 MIN_SIMILARITY_THRESHOLD: float = 0.57
+# Lower threshold for actually including knowledge in the prompt (so short queries like
+# "support hours?" still retrieve relevant FAQ entries).
+MIN_SIMILARITY_RETRIEVAL: float = 0.38
 
 
 class BackendConfig:

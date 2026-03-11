@@ -16,7 +16,7 @@ from backend.services.limit_service import (
     check_daily_ticket_limit,
     check_monthly_tokens,
 )
-from backend.config import MIN_SIMILARITY_THRESHOLD
+from backend.config import MIN_SIMILARITY_RETRIEVAL, MIN_SIMILARITY_THRESHOLD
 from backend.services.ai_service import AIServiceError, get_ai_response
 from backend.services.knowledge_service import search_knowledge
 from backend.services.message_service import add_message, get_last_messages
@@ -102,12 +102,14 @@ async def relay_message(
             await session.flush()
 
             # 6. Build prompt context (system prompt + knowledge + history)
+            # Use lower threshold for retrieval so short queries (e.g. "support hours?")
+            # still get relevant knowledge; low_confidence still uses MIN_SIMILARITY_THRESHOLD
             knowledge_items, top_similarity = await search_knowledge(
                 session,
                 guild_id,
                 payload.content,
                 top_k=4,
-                min_score=MIN_SIMILARITY_THRESHOLD,
+                min_score=MIN_SIMILARITY_RETRIEVAL,
             )
             last_msgs = await get_last_messages(session, ticket.id, limit=8)
             knowledge_chunks = [

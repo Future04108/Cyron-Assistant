@@ -16,6 +16,11 @@ class BuiltPromptContext(TypedDict):
 
 
 def _augment_system_prompt(base_prompt: str) -> str:
+    knowledge_instruction = (
+        "Answer using the relevant knowledge provided below. "
+        "Prefer the exact information from that knowledge over generic answers. "
+        "Only say that things vary or suggest contacting support if the knowledge does not contain the answer."
+    )
     safety_block = (
         "Keep replies under 300 words. Be concise and helpful. "
         "If information seems incomplete or question involves special cases/exceptions not fully covered, say: "
@@ -23,9 +28,10 @@ def _augment_system_prompt(base_prompt: str) -> str:
         "Do NOT guess or hallucinate."
     )
     base = (base_prompt or "").strip()
-    if not base:
-        return safety_block
-    return f"{base}\n\n{safety_block}"
+    parts = [knowledge_instruction, safety_block]
+    if base:
+        parts.insert(0, base)
+    return "\n\n".join(parts)
 
 
 def build_prompt_context(
