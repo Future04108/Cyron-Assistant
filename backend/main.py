@@ -39,6 +39,34 @@ structlog.configure(
 logging.basicConfig(level=getattr(logging, config.log_level))
 
 
+async def _connect_with_retries(
+    log: structlog.BoundLogger,
+    name: str,
+    max_attempts: int,
+    interval: float,
+    connect_fn,
+):
+    """Retry an async connect/init a few times so startup survives transient failures."""
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await connect_fn()
+            return
+        except Exception as e:
+            last_error = e
+            log.warning(
+                "startup_retry",
+                service=name,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                error=str(e),
+            )
+            if attempt < max_attempts:
+                await asyncio.sleep(interval)
+    if last_error:
+        raise last_error
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: DB, Redis, migrations, scheduler."""
@@ -48,24 +76,22 @@ async def lifespan(app: FastAPI):
     log = structlog.get_logger()
     log.info("phase", msg="Starting AI Ticket Assistant Backend")
 
-    # Redis
+    # Redis (retry so we tolerate brief unavailability after compose up)
     redis = Redis.from_url(config.redis_url, decode_responses=True)
-    try:
+
+    async def connect_redis():
         await redis.ping()
-    except Exception as e:
-        log.error("redis_connect_failed", error=str(e))
-        raise
+
+    await _connect_with_retries(log, "redis", max_attempts=5, interval=2.0, connect_fn=connect_redis)
     app.state.redis = redis
     log.info("redis_connected")
 
-    # Ensure database schema exists (Phase 2: use SQLAlchemy metadata)
-    # Alembic migrations can still be run manually if needed.
-    try:
+    # Database (retry so we tolerate Postgres not quite ready)
+    async def connect_db():
         await init_db()
-        log.info("db_initialized")
-    except Exception as e:
-        log.error("db_init_failed", error=str(e))
-        raise
+
+    await _connect_with_retries(log, "db", max_attempts=5, interval=2.0, connect_fn=connect_db)
+    log.info("db_initialized")
 
     # Scheduler for daily/monthly resets
     scheduler = AsyncIOScheduler()
