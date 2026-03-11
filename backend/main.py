@@ -46,7 +46,7 @@ async def _connect_with_retries(
     interval: float,
     connect_fn,
 ):
-    """Retry an async connect/init a few times so startup survives transient failures."""
+    """Retry an async connect/init so startup survives transient failures."""
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -64,6 +64,12 @@ async def _connect_with_retries(
             if attempt < max_attempts:
                 await asyncio.sleep(interval)
     if last_error:
+        log.error(
+            "startup_failed",
+            service=name,
+            error=str(last_error),
+            hint="Check DATABASE_URL/POSTGRES_PASSWORD if service=db, or REDIS_URL if service=redis.",
+        )
         raise last_error
 
 
@@ -82,7 +88,7 @@ async def lifespan(app: FastAPI):
     async def connect_redis():
         await redis.ping()
 
-    await _connect_with_retries(log, "redis", max_attempts=5, interval=2.0, connect_fn=connect_redis)
+    await _connect_with_retries(log, "redis", max_attempts=10, interval=2.0, connect_fn=connect_redis)
     app.state.redis = redis
     log.info("redis_connected")
 
@@ -90,7 +96,7 @@ async def lifespan(app: FastAPI):
     async def connect_db():
         await init_db()
 
-    await _connect_with_retries(log, "db", max_attempts=5, interval=2.0, connect_fn=connect_db)
+    await _connect_with_retries(log, "db", max_attempts=10, interval=2.0, connect_fn=connect_db)
     log.info("db_initialized")
 
     # Scheduler for daily/monthly resets

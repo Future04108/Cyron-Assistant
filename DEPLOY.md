@@ -36,9 +36,37 @@ Usually one of these:
 
    Do **not** run `docker compose down` or `docker volume rm ...` for normal code updates. That keeps Postgres and Redis (and their data) running; only the API is rebuilt and restarted.
 
-3. **If the API still does not come up**
-   - Check API logs: `docker compose logs api`
-   - If you see Postgres connection errors, confirm that `POSTGRES_PASSWORD` in `.env` is the same value that was used when the Postgres volume was first created. If you changed it at some point, the only way to “fix” without touching the DB is to set `POSTGRES_PASSWORD` back to that original value and restart the API.
+3. **If the API still does not come up** — see [Troubleshooting](#troubleshooting-api-not-responding) below.
+
+## Troubleshooting: API not responding
+
+When `curl http://YOUR_SERVER_IP:8000/health` fails:
+
+1. **Check API logs (always do this first)**  
+   ```bash
+   docker compose logs api --tail 100
+   ```  
+   Look for:
+   - `"startup_failed"` or `"startup_retry"` — the API is failing to connect to Postgres or Redis.
+   - If you see `password authentication failed` or `connection refused` for Postgres: **`POSTGRES_PASSWORD` in `.env` must match the password used when the Postgres volume was first created.** If you changed it later, set it back to that original value (or remove the volume and lose data to re-initialize).
+
+2. **Test from the server itself**  
+   On the VPS run:
+   ```bash
+   curl http://127.0.0.1:8000/health
+   ```  
+   - If this returns `200` but curl to `http://YOUR_SERVER_IP:8000/health` fails: the API is up; the problem is firewall or routing. Open port 8000 (e.g. `ufw allow 8000 && ufw reload`) or use a reverse proxy.
+   - If `127.0.0.1` also fails: the API process is likely crashing. Rely on step 1 (logs) to see the error.
+
+3. **Wait for startup**  
+   The API retries DB/Redis for up to ~20 seconds. After `docker compose up -d`, wait 30–60 seconds then try `curl http://127.0.0.1:8000/health` again.
+
+4. **Run without host volume mounts (production)**  
+   If the host’s `./backend` or `./shared` might be broken or different, run using the image’s code only (no mounts):
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+   ```  
+   This keeps the database; only the way the API/bot get their code changes (from the image, not from the host).
 
 ## Optional: full stack restart (still keeps data)
 
