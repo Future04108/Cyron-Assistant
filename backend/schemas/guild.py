@@ -22,6 +22,10 @@ class GuildResponse(BaseModel):
         default=None, description="Discord guild icon URL (if available)"
     )
     plan: str
+    has_bot: bool = Field(
+        default=False,
+        description="True if the Cyron Assistant bot is currently installed in this guild",
+    )
     monthly_tokens_used: int
     daily_ticket_count: int
     concurrent_ai_sessions: int

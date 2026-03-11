@@ -73,10 +73,25 @@ class AITicketBot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
+        # Let backend know which guilds currently have the bot installed.
+        try:
+            client = get_client()
+            for g in self.guilds:
+                await client.mark_guild_has_bot(str(g.id))
+        except Exception as e:
+            logger.warning(f"Failed to sync bot-installed guilds to backend: {e}")
+
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
         try:
+            # Mark in backend that this guild has the bot installed
+            try:
+                client = get_client()
+                await client.mark_guild_has_bot(str(guild.id))
+            except Exception as e:
+                logger.warning("Failed to notify backend of new guild %s: %s", guild.id, e)
+
             embed = create_ticket_embed(
                 title="AI Ticket Assistant",
                 description=(
@@ -103,6 +118,11 @@ class AITicketBot(commands.Bot):
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Called when the bot leaves a guild."""
         logger.info(f"Left guild: {guild.name} (ID: {guild.id})")
+        try:
+            client = get_client()
+            await client.mark_guild_bot_removed(str(guild.id))
+        except Exception as e:
+            logger.warning("Failed to notify backend of guild removal %s: %s", guild.id, e)
 
     async def close(self) -> None:
         """Called when the bot is shutting down."""

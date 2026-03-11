@@ -19,6 +19,10 @@ def _icon_key(guild_id: int) -> str:
     return f"guild:{guild_id}:icon_url"
 
 
+def _bot_guild_key(guild_id: int) -> str:
+    return f"bot:guild:{guild_id}:installed"
+
+
 @router.get("/guilds", response_model=list[GuildResponse])
 async def get_all_guilds(
     session: AsyncSession = Depends(get_session),
@@ -36,6 +40,8 @@ async def get_all_guilds(
         if not (g.name or "").strip():
             continue
         icon_url = await redis.get(_icon_key(g.id))
+        has_bot_raw = await redis.get(_bot_guild_key(g.id))
+        has_bot = bool(has_bot_raw == "1")
         responses.append(
             GuildResponse(
                 id=g.id,
@@ -49,6 +55,7 @@ async def get_all_guilds(
                 last_monthly_reset=g.last_monthly_reset,
                 system_prompt=g.system_prompt,
                 embed_color=g.embed_color or "#00b4ff",
+                has_bot=has_bot,
             )
         )
     return responses
@@ -74,6 +81,8 @@ async def get_or_create_guild(
     guild = await upsert_guild(session, gid)
     logger.info("guild_get_or_create", guild_id=gid, plan=guild.plan)
     icon_url = await redis.get(_icon_key(guild.id))
+    has_bot_raw = await redis.get(_bot_guild_key(guild.id))
+    has_bot = bool(has_bot_raw == "1")
     return GuildResponse(
         id=guild.id,
         name=guild.name,
@@ -86,6 +95,7 @@ async def get_or_create_guild(
         last_monthly_reset=guild.last_monthly_reset,
         system_prompt=guild.system_prompt,
         embed_color=guild.embed_color or "#00b4ff",
+        has_bot=has_bot,
     )
 
 
@@ -94,6 +104,7 @@ async def update_guild(
     guild_id: str,
     body: GuildUpdate,
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> GuildResponse:
     """Update mutable guild fields: name, plan, system_prompt."""
     try:
@@ -130,6 +141,8 @@ async def update_guild(
         guild.embed_color = body.embed_color
 
     logger.info("guild_updated", guild_id=gid, plan=guild.plan)
+    has_bot_raw = await redis.get(_bot_guild_key(guild.id))
+    has_bot = bool(has_bot_raw == "1")
     return GuildResponse(
         id=guild.id,
         name=guild.name,
@@ -141,4 +154,5 @@ async def update_guild(
         last_monthly_reset=guild.last_monthly_reset,
         system_prompt=guild.system_prompt,
         embed_color=guild.embed_color or "#00b4ff",
+        has_bot=has_bot,
     )

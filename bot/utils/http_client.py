@@ -53,6 +53,36 @@ class BackendClient:
             logger.warning(f"Failed to fetch guild {guild_id}: {e}")
             return None
 
+    async def mark_guild_has_bot(self, guild_id: str) -> None:
+        """Notify backend that the bot is installed in this guild."""
+        url = f"{self.base_url}/internal/bot/guilds/{guild_id}/installed"
+        session = await self._get_session()
+        try:
+            async with session.post(url) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.warning(
+                        "mark_guild_has_bot_failed",
+                        extra={"status": response.status, "body": text},
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to mark guild {guild_id} has bot: {e}")
+
+    async def mark_guild_bot_removed(self, guild_id: str) -> None:
+        """Notify backend that the bot has been removed from this guild."""
+        url = f"{self.base_url}/internal/bot/guilds/{guild_id}/removed"
+        session = await self._get_session()
+        try:
+            async with session.post(url) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.warning(
+                        "mark_guild_bot_removed_failed",
+                        extra={"status": response.status, "body": text},
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to mark guild {guild_id} bot removed: {e}")
+
     async def relay_message(
         self,
         guild_id: str,

@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from backend.config import config
-from backend.api import health, relay, knowledge, usage, guilds, auth
+from backend.api import health, relay, knowledge, usage, guilds, auth, bot_internal
 from backend.db.session import async_session_factory, engine, init_db
 from backend.services.reset_service import run_daily_reset, run_monthly_reset
 
@@ -151,6 +151,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(bot_internal.router)
 app.include_router(guilds.router)
 app.include_router(knowledge.router)
 app.include_router(usage.router)
