@@ -3,14 +3,18 @@
 import re
 from datetime import datetime
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, field_serializer
 
 
 HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 class GuildResponse(BaseModel):
-    """API response model for a guild."""
+    """API response model for a guild.
+
+    id is serialized as string in JSON so JavaScript clients do not lose
+    precision (Discord snowflake IDs exceed Number.MAX_SAFE_INTEGER).
+    """
 
     id: int = Field(..., description="Discord guild ID")
     name: str
@@ -30,6 +34,12 @@ class GuildResponse(BaseModel):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("id")
+    @classmethod
+    def serialize_id(cls, v: int) -> str:
+        """Emit guild ID as string so JS clients preserve full precision."""
+        return str(v)
 
 
 class GuildUpdate(BaseModel):
