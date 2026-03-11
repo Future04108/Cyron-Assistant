@@ -1,5 +1,27 @@
 # Deploying and Restarting (Without Losing Data)
 
+## Fix: "password authentication failed for user postgres"
+
+If API logs show `InvalidPasswordError` or `password authentication failed for user "postgres"`, the password in `.env` does not match the one the Postgres volume was created with.
+
+**Option A — Keep existing data:** Set `POSTGRES_PASSWORD` in `.env` to the value that was used when the volume was first created. If you never set it, that value is usually **`postgres`**. Then restart the API:
+
+```bash
+docker compose up -d api
+```
+
+**Option B — Reset DB (data loss):** If you don’t need the data, re-create the volume so Postgres uses your current password:
+
+```bash
+docker compose down
+docker volume rm cyron-assistant_postgres_data
+docker compose up -d --build
+```
+
+After this, do not change `POSTGRES_PASSWORD` again, or you’ll hit the same error until you reset the volume or set the password back.
+
+---
+
 ## You should never have to delete the database for a code update
 
 Removing the Postgres volume (`docker volume rm ...`) is **not** required when you change application code (e.g. `backend/schemas/guild.py`). The database only stores your data; code changes do not require re-initializing it.

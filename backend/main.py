@@ -64,12 +64,15 @@ async def _connect_with_retries(
             if attempt < max_attempts:
                 await asyncio.sleep(interval)
     if last_error:
-        log.error(
-            "startup_failed",
-            service=name,
-            error=str(last_error),
-            hint="Check DATABASE_URL/POSTGRES_PASSWORD if service=db, or REDIS_URL if service=redis.",
-        )
+        err_msg = str(last_error)
+        hint = "Check DATABASE_URL/POSTGRES_PASSWORD if service=db, or REDIS_URL if service=redis."
+        if "InvalidPasswordError" in type(last_error).__name__ or "password authentication failed" in err_msg:
+            hint = (
+                "Postgres password mismatch: POSTGRES_PASSWORD in .env must match the password "
+                "used when the Postgres volume was first created (often 'postgres'). "
+                "Either set POSTGRES_PASSWORD to that value, or remove the postgres volume to re-initialize (data loss)."
+            )
+        log.error("startup_failed", service=name, error=err_msg, hint=hint)
         raise last_error
 
 
