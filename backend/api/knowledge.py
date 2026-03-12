@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
+from backend.dependencies import require_guild_admin
 from backend.schemas.knowledge import KnowledgeCreate, KnowledgeUpdate, KnowledgeResponse
 from backend.services.guild_service import get_guild
 from backend.services.knowledge_service import (
@@ -23,7 +24,7 @@ router = APIRouter(prefix="/guilds/{guild_id}/knowledge", tags=["knowledge"])
 
 @router.get("", response_model=list[KnowledgeResponse])
 async def list_guild_knowledge(
-    guild_id: int,
+    guild_id: int = Depends(require_guild_admin),
     session: AsyncSession = Depends(get_session),
 ):
     """List all knowledge entries for a guild."""
@@ -46,7 +47,7 @@ async def list_guild_knowledge(
 
 @router.post("", response_model=KnowledgeResponse)
 async def create_guild_knowledge(
-    guild_id: int,
+    guild_id: int = Depends(require_guild_admin),
     body: KnowledgeCreate,
     session: AsyncSession = Depends(get_session),
 ):
@@ -77,7 +78,7 @@ async def create_guild_knowledge(
 
 @router.get("/{knowledge_id}", response_model=KnowledgeResponse)
 async def get_guild_knowledge(
-    guild_id: int,
+    guild_id: int = Depends(require_guild_admin),
     knowledge_id: UUID,
     session: AsyncSession = Depends(get_session),
 ):
@@ -100,7 +101,7 @@ async def get_guild_knowledge(
 
 @router.put("/{knowledge_id}", response_model=KnowledgeResponse)
 async def update_guild_knowledge(
-    guild_id: int,
+    guild_id: int = Depends(require_guild_admin),
     knowledge_id: UUID,
     body: KnowledgeUpdate,
     session: AsyncSession = Depends(get_session),
@@ -132,7 +133,7 @@ async def update_guild_knowledge(
 
 @router.delete("/{knowledge_id}", status_code=204)
 async def delete_guild_knowledge(
-    guild_id: int,
+    guild_id: int = Depends(require_guild_admin),
     knowledge_id: UUID,
     session: AsyncSession = Depends(get_session),
 ):

@@ -1,10 +1,10 @@
 """Usage API - GET /guilds/{guild_id}/usage."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.dependencies import get_redis
+from backend.dependencies import get_redis, require_guild_admin
 from backend.db.session import get_session
 from backend.schemas.plans import PLAN_LIMITS
 from backend.schemas.usage import UsageResponse
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/guilds/{guild_id}/usage", tags=["usage"])
 
 @router.get("", response_model=UsageResponse)
 async def get_guild_usage(
-    guild_id: int,
+    guild_id: int = Depends(require_guild_admin),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ):

@@ -23,6 +23,7 @@ from backend.services.auth_service import (
 from backend.db.session import get_session
 from backend.dependencies import get_redis
 from backend.services.guild_service import upsert_guild
+from backend.services.user_guild_service import upsert_user_guilds
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -99,6 +100,10 @@ async def discord_oauth_callback(
             if _has_admin_or_manage(g.get("permissions"), g.get("owner"))
         ]
 
+        # Persist guilds and user↔guild mappings for authorization
+        user_id = str(discord_user.get("id", ""))
+        admin_guild_ids: list[int] = []
+
         for g in admin_guilds:
             gid = g.get("id")
             name = g.get("name") or ""
@@ -110,6 +115,7 @@ async def discord_oauth_callback(
                 continue
 
             await upsert_guild(session, gid_int, name=name)
+            admin_guild_ids.append(gid_int)
 
             icon_hash = g.get("icon")
             if icon_hash:
@@ -118,8 +124,16 @@ async def discord_oauth_callback(
                 )
                 await redis.set(f"guild:{gid_int}:icon_url", icon_url)
 
+        # Record which guilds this user may manage.
+        if user_id and admin_guild_ids:
+            await upsert_user_guilds(session, user_id, admin_guild_ids, role="admin")
+
         await session.commit()
-        logger.info("auth_discord_sync_guilds", guild_count=len(admin_guilds))
+        logger.info(
+            "auth_discord_sync_guilds",
+            guild_count=len(admin_guild_ids),
+            user_id=user_id,
+        )
     except Exception as exc:  # pragma: no cover - non-critical
         logger.warning("auth_discord_sync_guilds_failed", error=str(exc))
 

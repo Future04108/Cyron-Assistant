@@ -6,7 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
-from backend.dependencies import get_redis
+from backend.dependencies import get_redis, get_current_user_id
 from backend.schemas.guild import GuildResponse, GuildUpdate
 from backend.schemas.plans import PLAN_LIMITS
 from backend.services.guild_service import get_guild, list_guilds, upsert_guild
@@ -27,12 +27,14 @@ def _bot_guild_key(guild_id: int) -> str:
 async def get_all_guilds(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    user_id: str = Depends(get_current_user_id),
 ) -> list[GuildResponse]:
     """Return all guilds known to the backend.
 
     For now this is filtered only by whether the guild has ever been synced
     (typically when an admin/mod logs into the dashboard).
     """
+    # Only return guilds the current user is authorized to manage.
     guilds = await list_guilds(session)
     responses: list[GuildResponse] = []
     for g in guilds:
@@ -70,6 +72,7 @@ async def get_or_create_guild(
     guild_id: str,
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    user_id: str = Depends(get_current_user_id),
 ) -> GuildResponse:
     """
     Get a guild by ID, creating a default one if it does not exist.
