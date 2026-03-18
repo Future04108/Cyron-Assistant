@@ -31,6 +31,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 ALLOWED_REDIRECT_URIS: list[str] = [
     "https://cyron-assistant.vercel.app/auth/callback",
+    "http://localhost:5173/auth/callback",
 ]
 
 
