@@ -6,11 +6,12 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
-from backend.dependencies import get_redis, get_current_user_id
+from backend.dependencies import get_redis, get_current_user_id, require_guild_admin
 from backend.services.user_guild_service import list_user_guild_ids
 from backend.schemas.guild import GuildResponse, GuildUpdate
 from backend.schemas.plans import PLAN_LIMITS
 from backend.services.guild_service import get_guild, list_guilds, upsert_guild
+from backend.services.usage_service import get_usage_history, get_recent_usage_logs
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["guilds"])
@@ -170,3 +171,31 @@ async def update_guild(
         embed_color=guild.embed_color or "#00b4ff",
         has_bot=has_bot,
     )
+
+
+@router.get("/guilds/{guild_id}/usage/history")
+async def get_guild_usage_history(
+    guild_id: int = Depends(require_guild_admin),
+    days: int = 7,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    """Return per-day token usage history for the given guild."""
+    if days <= 0:
+        raise HTTPException(status_code=400, detail="days must be positive")
+    days = min(days, 30)
+    history = await get_usage_history(session, guild_id=guild_id, days=days)
+    return history
+
+
+@router.get("/guilds/{guild_id}/usage/logs")
+async def get_guild_usage_logs(
+    guild_id: int = Depends(require_guild_admin),
+    limit: int = 10,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    """Return recent usage logs for the given guild."""
+    if limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be positive")
+    limit = min(limit, 100)
+    logs = await get_recent_usage_logs(session, guild_id=guild_id, limit=limit)
+    return logs
