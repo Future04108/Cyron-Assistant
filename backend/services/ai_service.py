@@ -21,11 +21,22 @@ def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
     """Convert PromptContext into OpenAI-style chat messages."""
     messages: list[dict[str, str]] = []
 
-    # System prompt with safety and behavior instructions
-    messages.append({"role": "system", "content": prompt_context.system_prompt})
+    # Lightweight path: no relevant knowledge retrieved; keep prompt minimal.
+    lightweight = len(prompt_context.knowledge_chunks) == 0
+    if lightweight:
+        messages.append(
+            {
+                "role": "system",
+                "content": prompt_context.system_prompt
+                or "You are a concise support assistant. Answer briefly and clearly.",
+            }
+        )
+    else:
+        # System prompt with safety and behavior instructions
+        messages.append({"role": "system", "content": prompt_context.system_prompt})
 
     # Encode knowledge chunks into a single system message to reduce tokens
-    if prompt_context.knowledge_chunks:
+    if not lightweight and prompt_context.knowledge_chunks:
         parts: list[str] = []
         for idx, chunk in enumerate(prompt_context.knowledge_chunks, start=1):
             title = str(chunk.get("title", "")).strip()
@@ -35,8 +46,9 @@ def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
         knowledge_text = "Relevant knowledge:\n\n" + "\n\n---\n\n".join(parts)
         messages.append({"role": "system", "content": knowledge_text})
 
-    # Conversation history (already truncated to last N messages by prompt builder)
-    for msg in prompt_context.message_history:
+    # Conversation history (trim harder for lightweight prompts)
+    history = prompt_context.message_history[-3:] if lightweight else prompt_context.message_history
+    for msg in history:
         role = msg.get("role", "user")
         content = msg.get("content", "")
         # Guard against empty content; OpenAI expects non-empty strings

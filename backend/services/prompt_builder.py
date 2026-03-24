@@ -13,6 +13,7 @@ class BuiltPromptContext(TypedDict):
     low_confidence: bool
     injected_knowledge_chars: int
     top_similarity: float
+    lightweight_mode: bool
 
 
 def _augment_system_prompt(base_prompt: str) -> str:
@@ -32,6 +33,16 @@ def _augment_system_prompt(base_prompt: str) -> str:
     if base:
         parts.insert(0, base)
     return "\n\n".join(parts)
+
+
+def _minimal_system_prompt(base_prompt: str) -> str:
+    base = (base_prompt or "").strip()
+    minimal = (
+        "You are a concise support assistant. Keep the answer under 120 words. "
+        "If the user asks for account-specific or policy-specific details you don't know, "
+        "ask a short clarifying question or suggest contacting support."
+    )
+    return f"{base}\n\n{minimal}" if base else minimal
 
 
 def build_prompt_context(
@@ -64,10 +75,17 @@ def build_prompt_context(
         selected_chunks.append(chunk)
 
     low_confidence = top_similarity < min_confidence or not selected_chunks
-    augmented_system_prompt = _augment_system_prompt(system_prompt)
+    lightweight_mode = low_confidence or len(selected_chunks) == 0
+    if lightweight_mode:
+        # For trivial/off-topic prompts with no useful knowledge, avoid heavy RAG prompt.
+        selected_chunks = []
+        history = history[-3:]
+        final_system_prompt = _minimal_system_prompt(system_prompt)
+    else:
+        final_system_prompt = _augment_system_prompt(system_prompt)
 
     prompt_context = PromptContext(
-        system_prompt=augmented_system_prompt,
+        system_prompt=final_system_prompt,
         knowledge_chunks=selected_chunks,
         message_history=history,
     )
@@ -77,5 +95,6 @@ def build_prompt_context(
         low_confidence=low_confidence,
         injected_knowledge_chars=total_chars,
         top_similarity=top_similarity,
+        lightweight_mode=lightweight_mode,
     )
 
