@@ -22,6 +22,7 @@ from backend.config import config
 from backend.api import health, relay, knowledge, usage, guilds, auth, bot_internal
 from backend.db.session import async_session_factory, engine, init_db
 from backend.services.reset_service import run_daily_reset, run_monthly_reset
+from backend.utils.embeddings import warmup_embeddings
 
 # Structlog configuration
 structlog.configure(
@@ -101,6 +102,15 @@ async def lifespan(app: FastAPI):
 
     await _connect_with_retries(log, "db", max_attempts=10, interval=2.0, connect_fn=connect_db)
     log.info("db_initialized")
+
+    # Warm up sentence-transformer model at startup so first knowledge insert
+    # does not block for 30-60s during lazy model load.
+    try:
+        await asyncio.to_thread(warmup_embeddings)
+        log.info("embeddings_warmed")
+    except Exception as e:
+        # Best-effort optimization only; do not block API startup.
+        log.warning("embeddings_warmup_failed", error=str(e))
 
     # Scheduler for daily/monthly resets
     scheduler = AsyncIOScheduler()

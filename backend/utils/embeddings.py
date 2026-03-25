@@ -25,6 +25,16 @@ def embed_text(text: str) -> list[float]:
     return embedding.tolist()
 
 
+def warmup_embeddings() -> None:
+    """Warm up embedding model and first inference.
+
+    This removes the cold-start delay on the first knowledge write request.
+    """
+    model = get_embedding_model()
+    # Tiny inference to initialize model internals/JIT/caches.
+    model.encode("warmup", convert_to_numpy=True)
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
     import numpy as np
