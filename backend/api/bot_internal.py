@@ -11,7 +11,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
-from backend.dependencies import get_redis
+from backend.dependencies import get_redis, require_bot_api_key
 from backend.services.guild_service import upsert_guild
 
 logger = structlog.get_logger()
@@ -32,6 +32,7 @@ class BotGuildPayload(BaseModel):
 async def mark_guild_has_bot(
     guild_id: str,
     body: BotGuildPayload | None = None,
+    _: None = Depends(require_bot_api_key),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> dict:
@@ -59,6 +60,7 @@ async def mark_guild_has_bot(
 @router.post("/guilds/{guild_id}/removed")
 async def mark_guild_bot_removed(
     guild_id: str,
+    _: None = Depends(require_bot_api_key),
     redis: Redis = Depends(get_redis),
 ) -> dict:
     """Mark that the bot has been removed from the given guild."""

@@ -23,6 +23,10 @@ class BackendClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: aiohttp.ClientSession | None = None
+        self._bot_headers = {
+            "Content-Type": "application/json",
+            "X-Bot-Api-Key": config.bot_api_key,
+        }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -61,7 +65,11 @@ class BackendClient:
             payload: dict[str, Any] = {}
             if name:
                 payload["name"] = name
-            async with session.post(url, json=payload or None) as response:
+            async with session.post(
+                url,
+                json=payload or None,
+                headers=self._bot_headers,
+            ) as response:
                 if response.status != 200:
                     text = await response.text()
                     logger.warning(
@@ -76,7 +84,7 @@ class BackendClient:
         url = f"{self.base_url}/internal/bot/guilds/{guild_id}/removed"
         session = await self._get_session()
         try:
-            async with session.post(url) as response:
+            async with session.post(url, headers=self._bot_headers) as response:
                 if response.status != 200:
                     text = await response.text()
                     logger.warning(
@@ -131,7 +139,7 @@ class BackendClient:
                     f"Relaying message to backend (attempt {attempt + 1}/{max_retries + 1})"
                 )
                 async with session.post(
-                    url, json=payload, headers={"Content-Type": "application/json"}
+                    url, json=payload, headers=self._bot_headers
                 ) as response:
                     if response.status == 200:
                         data = await response.json()

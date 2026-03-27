@@ -1,6 +1,7 @@
 """FastAPI dependencies for Redis, auth, and authorization."""
 
 from typing import Annotated
+import secrets
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from redis.asyncio import Redis
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.session import get_session
 from backend.services.auth_service import decode_app_token
 from backend.services.user_guild_service import user_has_guild
+from backend.config import config
 
 
 def get_redis(request: Request) -> Redis:
@@ -52,4 +54,25 @@ async def require_guild_admin(
             detail="You are not authorized to manage this guild.",
         )
     return guild_id
+
+
+async def require_bot_api_key(
+    x_bot_api_key: str | None = Header(default=None, alias="X-Bot-Api-Key"),
+) -> None:
+    """Require valid bot credential for bot-only endpoints."""
+    expected = (config.bot_api_key or "").strip()
+    provided = (x_bot_api_key or "").strip()
+
+    if not expected:
+        # Fail-closed to avoid accidental public exposure.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="BOT_API_KEY is not configured on server.",
+        )
+
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid bot credentials.",
+        )
 

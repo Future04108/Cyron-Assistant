@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from backend.db.session import get_session
-from backend.dependencies import get_redis
+from backend.dependencies import get_redis, require_bot_api_key
 from backend.schemas.relay import RelayRequest, RelayResponse
 from backend.services.guild_service import upsert_guild
 from backend.services.ticket_service import get_ticket, get_or_create_ticket
@@ -30,6 +30,7 @@ router = APIRouter(prefix="/relay", tags=["relay"])
 @router.post("", response_model=RelayResponse)
 async def relay_message(
     payload: RelayRequest,
+    _: None = Depends(require_bot_api_key),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> RelayResponse:

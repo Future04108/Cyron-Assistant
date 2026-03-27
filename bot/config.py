@@ -19,12 +19,15 @@ class BotConfig:
         self.backend_url: str = os.getenv("BACKEND_URL", "http://localhost:8000")
         # Remove trailing slash if present
         self.backend_url = self.backend_url.rstrip("/")
+        self.bot_api_key: str = os.getenv("BOT_API_KEY", "").strip()
+        if not self.bot_api_key:
+            raise ValueError("BOT_API_KEY environment variable is required")
 
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
     def validate(self) -> bool:
         """Validate that all required configuration is present."""
-        return bool(self.discord_token and self.backend_url)
+        return bool(self.discord_token and self.backend_url and self.bot_api_key)
 
 
 # Global config instance

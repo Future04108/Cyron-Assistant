@@ -63,6 +63,7 @@ services:
       # Must match POSTGRES_PASSWORD used by postgres service (from .env or default).
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_ticket_assistant
       - REDIS_URL=redis://redis:6379/0
+      - BOT_API_KEY=${BOT_API_KEY}
     ports:
       - "8000:8000"
     depends_on:
@@ -86,6 +87,7 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - BACKEND_URL=http://api:8000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - BOT_API_KEY=${BOT_API_KEY}
     depends_on:
       - api
     networks:

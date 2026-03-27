@@ -25,6 +25,8 @@ class BackendConfig:
             "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_ticket_assistant",
         )
         self.redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        # Bot-to-backend internal auth (mandatory for /relay and /internal/bot/*).
+        self.bot_api_key: str = os.getenv("BOT_API_KEY", "").strip()
         # AI provider configuration (Phase 3)
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
         self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
