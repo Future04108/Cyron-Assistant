@@ -43,7 +43,11 @@ def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
             content = str(chunk.get("content", "")).strip()
             header = f"[{idx}] {title}" if title else f"[{idx}]"
             parts.append(f"{header}\n{content}")
-        knowledge_text = "Relevant knowledge:\n\n" + "\n\n---\n\n".join(parts)
+        knowledge_text = (
+            "Relevant knowledge (authoritative for this server - use only this plus the "
+            "conversation; do not use outside/web sources):\n\n"
+            + "\n\n---\n\n".join(parts)
+        )
         messages.append({"role": "system", "content": knowledge_text})
 
     # Conversation history (trim harder for lightweight prompts)

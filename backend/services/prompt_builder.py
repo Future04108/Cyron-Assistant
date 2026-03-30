@@ -18,9 +18,13 @@ class BuiltPromptContext(TypedDict):
 
 def _augment_system_prompt(base_prompt: str) -> str:
     knowledge_instruction = (
-        "Answer using the relevant knowledge provided below. "
-        "Prefer the exact information from that knowledge over generic answers. "
-        "Only say that things vary or suggest contacting support if the knowledge does not contain the answer."
+        "You do not have access to the web or live data. Answer ONLY from: (1) the "
+        "\"Relevant knowledge\" section below, and (2) this ticket conversation. "
+        "Treat that knowledge as the single source of truth for facts about this server/product. "
+        "Quote or paraphrase it closely when it applies. "
+        "If the knowledge does not contain the answer, say clearly that it is not in the "
+        "provided information and suggest contacting the team or support - do not fill in "
+        "with general internet or training-data guesses."
     )
     safety_block = (
         "Keep replies under 300 words. Be concise and helpful. "
@@ -39,8 +43,10 @@ def _minimal_system_prompt(base_prompt: str) -> str:
     base = (base_prompt or "").strip()
     minimal = (
         "You are a concise support assistant. Keep the answer under 120 words. "
-        "If the user asks for account-specific or policy-specific details you don't know, "
-        "ask a short clarifying question or suggest contacting support."
+        "No web access: do not answer with general internet or training knowledge as if it "
+        "were facts about this server. If the team has not provided details in this chat, "
+        "say you do not have that information here and suggest they contact staff or rephrase. "
+        "Ask a short clarifying question when helpful."
     )
     return f"{base}\n\n{minimal}" if base else minimal
 
@@ -75,14 +81,18 @@ def build_prompt_context(
         selected_chunks.append(chunk)
 
     low_confidence = top_similarity < min_confidence or not selected_chunks
-    lightweight_mode = low_confidence or len(selected_chunks) == 0
+    # Only drop RAG when there is nothing to inject. If we have chunks (even weak matches),
+    # keep the full knowledge-grounded path — otherwise the model falls back to generic
+    # training data and answers feel like "the internet".
+    lightweight_mode = len(selected_chunks) == 0
     if lightweight_mode:
-        # For trivial/off-topic prompts with no useful knowledge, avoid heavy RAG prompt.
         selected_chunks = []
         history = history[-3:]
         final_system_prompt = _minimal_system_prompt(system_prompt)
     else:
         final_system_prompt = _augment_system_prompt(system_prompt)
+
+    injected = sum(_chunk_len(c) for c in selected_chunks)
 
     prompt_context = PromptContext(
         system_prompt=final_system_prompt,
@@ -93,7 +103,7 @@ def build_prompt_context(
     return BuiltPromptContext(
         prompt_context=prompt_context,
         low_confidence=low_confidence,
-        injected_knowledge_chars=total_chars,
+        injected_knowledge_chars=injected,
         top_similarity=top_similarity,
         lightweight_mode=lightweight_mode,
     )

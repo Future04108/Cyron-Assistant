@@ -240,11 +240,25 @@ async def search_knowledge(
     )
 
     filtered = [(s, k) for s, k in scored if s >= min_score]
-    if not filtered:
-        return [], top_raw_similarity
+    if filtered:
+        top_items = filtered[:top_k]
+        top_sim = top_items[0][0]
+        return [k for _, k in top_items], float(top_sim)
 
-    top_items = filtered[:top_k]
-    top_sim = top_items[0][0]
+    # Best-effort: if the guild has knowledge but nothing met min_score (query wording
+    # mismatch, short questions, etc.), still return the top matches so the model can
+    # ground on your KB instead of generic training data.
+    fallback = scored[:top_k]
+    if fallback:
+        top_sim = float(fallback[0][0])
+        logger.info(
+            "search_knowledge_fallback_best_effort",
+            guild_id=guild_id,
+            top_similarity=top_sim,
+            min_score=min_score,
+            returned=len(fallback),
+        )
+        return [k for _, k in fallback], top_sim
 
-    return [k for _, k in top_items], float(top_sim)
+    return [], top_raw_similarity
 
