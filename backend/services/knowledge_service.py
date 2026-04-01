@@ -158,19 +158,15 @@ def build_injection_chunk(knowledge: Knowledge, query: str) -> dict[str, str]:
     additional_context = (knowledge.additional_context or parsed_additional or "").strip()
     behavior_notes = (knowledge.behavior_notes or parsed_notes or "").strip()
 
-    query_terms = {t for t in re.findall(r"[a-z0-9]{3,}", query.lower())}
-    optional_pool = f"{additional_context}\n{behavior_notes}".lower()
-    optional_relevant = bool(query_terms and any(term in optional_pool for term in query_terms))
-
     chunk: dict[str, str] = {
         "title": knowledge.title,
         "main_content": _truncate(main_content, MAX_MAIN_CONTENT_CHARS) or "",
     }
-    if optional_relevant and additional_context:
+    if additional_context:
         chunk["additional_context"] = _truncate(
             additional_context, MAX_ADDITIONAL_CONTEXT_CHARS
         ) or ""
-    if optional_relevant and behavior_notes:
+    if behavior_notes:
         chunk["behavior_notes"] = _truncate(behavior_notes, MAX_BEHAVIOR_NOTES_CHARS) or ""
     return chunk
 

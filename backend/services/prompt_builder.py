@@ -1,4 +1,4 @@
-"""Prompt builder - strict knowledge-grounded prompts only."""
+"""Prompt builder for hybrid ticket-bot responses (knowledge-grounded path)."""
 
 from __future__ import annotations
 
@@ -7,15 +7,16 @@ from typing import Any, Dict, List, TypedDict
 from backend.config import MIN_SIMILARITY_THRESHOLD
 from backend.schemas.relay import PromptContext
 
-KNOWLEDGE_NOT_FOUND_REPLY = (
-    "I couldn't find that information in the knowledge base for this server. "
-    "Please provide more details or contact support."
-)
-
-STRICT_KB_SYSTEM_SUFFIX = (
-    "Answer only from provided knowledge. "
-    f"If insufficient, reply exactly: '{KNOWLEDGE_NOT_FOUND_REPLY}'. "
-    "No guessing or outside knowledge."
+KNOWLEDGE_CONVERSATIONAL_SUFFIX = (
+    "You are a professional support assistant (ticket-bot quality: clear, polite, concise). "
+    "Answer ONLY using the knowledge blocks below plus this ticket thread. "
+    "Write in the same language the user is using. "
+    "Use a natural, conversational tone — not robotic. "
+    "Structure: lead with facts from main_content; use additional_context and behavior_notes "
+    "when they clearly help answer the question. "
+    "If the knowledge does not contain the answer, say briefly that you do not have that "
+    "specific information here and suggest more detail or a human agent — do not invent facts "
+    "or use outside/general training knowledge."
 )
 
 
@@ -26,11 +27,11 @@ class BuiltPromptContext(TypedDict):
     top_similarity: float
 
 
-def _strict_system_prompt(base_prompt: str) -> str:
+def _knowledge_system_prompt(base_prompt: str) -> str:
     base = (base_prompt or "").strip()
     if base:
-        return f"{base}\n\n{STRICT_KB_SYSTEM_SUFFIX}"
-    return STRICT_KB_SYSTEM_SUFFIX
+        return f"{base}\n\n{KNOWLEDGE_CONVERSATIONAL_SUFFIX}"
+    return KNOWLEDGE_CONVERSATIONAL_SUFFIX
 
 
 def build_prompt_context(
@@ -42,10 +43,10 @@ def build_prompt_context(
     max_chars: int = 3_200,
 ) -> BuiltPromptContext:
     """
-    Build prompt context. Chunks are used only when retrieval is non-empty and
-    top_similarity meets MIN_SIMILARITY_THRESHOLD; otherwise chunks are cleared.
+    Build prompt for high-confidence RAG. Chunks cleared if nothing retrieved or
+    similarity below MIN_SIMILARITY_THRESHOLD.
     """
-    history = message_history[-4:]
+    history = message_history[-6:]
 
     def _chunk_len(chunk: Dict[str, Any]) -> int:
         title = str(chunk.get("title", ""))
@@ -70,7 +71,7 @@ def build_prompt_context(
     injected = sum(_chunk_len(c) for c in selected_chunks)
 
     prompt_context = PromptContext(
-        system_prompt=_strict_system_prompt(system_prompt),
+        system_prompt=_knowledge_system_prompt(system_prompt),
         knowledge_chunks=selected_chunks,
         message_history=history,
     )

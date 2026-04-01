@@ -1,14 +1,13 @@
 """Message relay endpoint - Phase 2 full flow."""
 
 import structlog
-import re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from backend.db.session import get_session
 from backend.dependencies import get_redis, require_bot_api_key
-from backend.schemas.relay import RelayRequest, RelayResponse
+from backend.schemas.relay import PromptContext, RelayRequest, RelayResponse
 from backend.services.guild_service import upsert_guild
 from backend.services.ticket_service import get_ticket, get_or_create_ticket
 from backend.services.limit_service import (
@@ -17,13 +16,18 @@ from backend.services.limit_service import (
     check_daily_ticket_limit,
     check_monthly_tokens,
 )
-from backend.config import MIN_SIMILARITY_RETRIEVAL, MIN_SIMILARITY_THRESHOLD
+from backend.config import MIN_SIMILARITY_RETRIEVAL
 from backend.services.ai_service import AIServiceError, get_ai_response
 from backend.services.knowledge_service import search_knowledge, build_injection_chunk
 from backend.services.message_service import add_message, get_last_messages
 from backend.services.prompt_builder import build_prompt_context
 from backend.services.usage_service import log_usage
-
+from backend.services.response_routing import (
+    detect_language_hint,
+    greeting_reply_for_language,
+    is_greeting_or_smalltalk,
+    kb_fallback_reply_for_language,
+)
 logger = structlog.get_logger()
 router = APIRouter(prefix="/relay", tags=["relay"])
 
@@ -103,52 +107,88 @@ async def relay_message(
             await add_message(session, ticket.id, "user", payload.content)
             await session.flush()
 
-            # 6. Build prompt context (system prompt + knowledge + history)
-            # Use lower threshold for retrieval so short queries (e.g. "support hours?")
-            # still get relevant knowledge; low_confidence still uses MIN_SIMILARITY_THRESHOLD
-            knowledge_items, top_similarity = await search_knowledge(
-                session,
-                guild_id,
-                payload.content,
-                top_k=4,
-                min_score=MIN_SIMILARITY_RETRIEVAL,
-            )
-            last_msgs = await get_last_messages(session, ticket.id, limit=8)
-            knowledge_chunks = [build_injection_chunk(k, payload.content) for k in knowledge_items]
-            message_history = [
-                {"role": m.role, "content": m.content} for m in last_msgs
-            ]
-            built = build_prompt_context(
-                guild.system_prompt or "",
-                knowledge_chunks,
-                message_history,
-                top_similarity=top_similarity,
-            )
-            prompt_context = built["prompt_context"]
-
-            # 7. Call AI model via LiteLLM
-            is_short_message = len(payload.content.strip()) <= 60 or len(
-                re.findall(r"\w+", payload.content)
-            ) <= 10
-            max_response_tokens = 180 if is_short_message else 400
+            lang = detect_language_hint(payload.content)
             prompt_tokens = 0
             completion_tokens = 0
-            try:
-                reply, prompt_tokens, completion_tokens = await get_ai_response(
-                    prompt_context, max_tokens=max_response_tokens
+            knowledge_items: list = []
+            top_similarity = 0.0
+            built: dict | None = None
+
+            # 6a. Greeting / small talk — templates only (no RAG, minimal tokens)
+            if is_greeting_or_smalltalk(payload.content):
+                reply = greeting_reply_for_language(lang)
+                prompt_context = PromptContext(
+                    system_prompt="",
+                    knowledge_chunks=[],
+                    message_history=[],
                 )
-            except AIServiceError as e:
-                logger.error(
-                    "ai_call_failed",
-                    error=str(e),
+                logger.info(
+                    "relay_path",
+                    path="greeting",
+                    lang=lang,
                     guild_id=guild_id,
-                    channel_id=channel_id,
                 )
-                reply = "AI is temporarily unavailable — support will reply soon."
-                prompt_tokens = 0
-                completion_tokens = 0
+            else:
+                # 6b. Semantic retrieval + knowledge-grounded or localized fallback
+                knowledge_items, top_similarity = await search_knowledge(
+                    session,
+                    guild_id,
+                    payload.content,
+                    top_k=3,
+                    min_score=MIN_SIMILARITY_RETRIEVAL,
+                )
+                last_msgs = await get_last_messages(session, ticket.id, limit=6)
+                knowledge_chunks = [
+                    build_injection_chunk(k, payload.content) for k in knowledge_items
+                ]
+                message_history = [
+                    {"role": m.role, "content": m.content} for m in last_msgs
+                ]
+                built = build_prompt_context(
+                    guild.system_prompt or "",
+                    knowledge_chunks,
+                    message_history,
+                    top_similarity=top_similarity,
+                )
+                prompt_context = built["prompt_context"]
+
+                if not prompt_context.knowledge_chunks:
+                    reply = kb_fallback_reply_for_language(lang)
+                    logger.info(
+                        "relay_path",
+                        path="kb_fallback",
+                        lang=lang,
+                        top_similarity=top_similarity,
+                        guild_id=guild_id,
+                    )
+                else:
+                    try:
+                        reply, prompt_tokens, completion_tokens = await get_ai_response(
+                            prompt_context, max_tokens=300
+                        )
+                        logger.info(
+                            "relay_path",
+                            path="knowledge_rag",
+                            lang=lang,
+                            top_similarity=top_similarity,
+                            guild_id=guild_id,
+                        )
+                    except AIServiceError as e:
+                        logger.error(
+                            "ai_call_failed",
+                            error=str(e),
+                            guild_id=guild_id,
+                            channel_id=channel_id,
+                        )
+                        reply = kb_fallback_reply_for_language(lang)
+                        prompt_tokens = 0
+                        completion_tokens = 0
 
             # Low-confidence suggestion is shown in Discord embed footer by the bot
+
+            injected_chars = built["injected_knowledge_chars"] if built else 0
+            low_conf_out = built["low_confidence"] if built else False
+            top_sim_out = float(built["top_similarity"]) if built else 0.0
 
             # 8. Store assistant reply
             await add_message(session, ticket.id, "assistant", reply)
@@ -171,8 +211,8 @@ async def relay_message(
                 plan=guild.plan,
                 knowledge_count=len(knowledge_items),
                 top_similarity=top_similarity,
-                injected_knowledge_chars=built["injected_knowledge_chars"],
-                low_confidence=built["low_confidence"],
+                injected_knowledge_chars=injected_chars,
+                low_confidence=low_conf_out,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
@@ -184,9 +224,9 @@ async def relay_message(
                 reply=reply,
                 prompt_context=prompt_context,
                 concurrent_now=current_concurrent,
-                low_confidence=built["low_confidence"],
-                injected_knowledge_chars=built["injected_knowledge_chars"],
-                top_similarity=built["top_similarity"],
+                low_confidence=low_conf_out,
+                injected_knowledge_chars=injected_chars,
+                top_similarity=top_sim_out,
                 token_usage={
                     "input": int(prompt_tokens),
                     "output": int(completion_tokens),

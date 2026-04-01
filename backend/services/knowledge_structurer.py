@@ -147,6 +147,7 @@ async def structure_knowledge_entry(
         "Return strict JSON only with keys: title, main_content, additional_context, behavior_notes. "
         "Keep text factual, deduplicated, and concise. "
         "main_content must capture core facts first. "
+        "Preserve the original language of the source (do not translate unless asked). "
         "additional_context and behavior_notes are optional and can be null.\n\n"
         f"INPUT:\n{json.dumps(user_payload, ensure_ascii=True)}"
     )

@@ -1,4 +1,4 @@
-"""AI service using LiteLLM to call OpenAI models."""
+"""AI service using LiteLLM — knowledge path, lightweight greeting path."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from litellm import acompletion
 
 from backend.config import config
 from backend.schemas.relay import PromptContext
-from backend.services.prompt_builder import KNOWLEDGE_NOT_FOUND_REPLY
 
 logger = structlog.get_logger(__name__)
 
@@ -18,12 +17,10 @@ class AIServiceError(Exception):
     """Raised when the AI provider call fails."""
 
 
-def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
-    """Convert PromptContext into OpenAI-style chat messages (knowledge path only)."""
+def _build_knowledge_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
     messages: list[dict[str, str]] = [
         {"role": "system", "content": prompt_context.system_prompt},
     ]
-
     parts: list[str] = []
     for idx, chunk in enumerate(prompt_context.knowledge_chunks, start=1):
         title = str(chunk.get("title", "")).strip()
@@ -31,13 +28,13 @@ def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
         additional_context = str(chunk.get("additional_context", "")).strip()
         behavior_notes = str(chunk.get("behavior_notes", "")).strip()
         header = f"[{idx}] {title}" if title else f"[{idx}]"
-        body_parts = [f"Main: {main_content}"]
+        body_parts = [f"main_content:\n{main_content}"]
         if additional_context:
-            body_parts.append(f"Context: {additional_context}")
+            body_parts.append(f"additional_context:\n{additional_context}")
         if behavior_notes:
-            body_parts.append(f"Behavior: {behavior_notes}")
+            body_parts.append(f"behavior_notes:\n{behavior_notes}")
         parts.append(f"{header}\n" + "\n".join(body_parts))
-    knowledge_text = "KB:\n" + "\n\n".join(parts)
+    knowledge_text = "Knowledge base (authoritative):\n\n" + "\n\n---\n\n".join(parts)
     messages.append({"role": "system", "content": knowledge_text})
 
     for msg in prompt_context.message_history:
@@ -51,7 +48,6 @@ def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
 
 
 def _extract_reply(response: Any) -> str:
-    """Extract assistant reply text from LiteLLM/OpenAI-style response."""
     choices = getattr(response, "choices", None)
     if choices is None and isinstance(response, dict):
         choices = response.get("choices")
@@ -75,7 +71,6 @@ def _extract_reply(response: Any) -> str:
 
 
 def _extract_usage(response: Any) -> Tuple[int, int]:
-    """Extract prompt and completion token counts from response. Returns (input, output)."""
     usage = getattr(response, "usage", None)
     if usage is None and isinstance(response, dict):
         usage = response.get("usage")
@@ -99,21 +94,13 @@ def _extract_usage(response: Any) -> Tuple[int, int]:
 
 
 async def get_ai_response(
-    prompt_context: PromptContext, max_tokens: int = 400
+    prompt_context: PromptContext, max_tokens: int = 300
 ) -> Tuple[str, int, int]:
-    """
-    Call the model only when knowledge chunks are present; otherwise return the
-    fixed not-found reply with zero token usage (no generic model fallback).
-    """
+    """Knowledge-grounded completion. Caller must pass chunks only when RAG applies."""
     if not prompt_context.knowledge_chunks:
-        logger.info(
-            "ai_response_skipped_no_knowledge",
-            reason="no_sufficient_knowledge_chunks",
-        )
-        return KNOWLEDGE_NOT_FOUND_REPLY, 0, 0
+        raise AIServiceError("get_ai_response requires non-empty knowledge_chunks")
 
-    messages = _build_messages(prompt_context)
-
+    messages = _build_knowledge_messages(prompt_context)
     api_key = config.openai_api_key
     if not api_key:
         raise AIServiceError("OPENAI_API_KEY is not configured.")
@@ -122,8 +109,8 @@ async def get_ai_response(
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
-            max_tokens=min(max_tokens, config.openai_max_tokens),
-            temperature=0.0,
+            max_tokens=min(max_tokens, config.openai_max_tokens, 300),
+            temperature=0.25,
             api_key=api_key,
         )
     except Exception as exc:  # pragma: no cover - provider-specific errors
