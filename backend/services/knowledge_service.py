@@ -403,9 +403,13 @@ async def search_knowledge(
     query: str,
     top_k: int = 4,
     min_score: float = MIN_SIMILARITY_THRESHOLD,
+    embedding_query: str | None = None,
 ) -> Tuple[list[Knowledge], float]:
     """
     Search knowledge by cosine similarity.
+
+    If embedding_query is set (e.g. English paraphrase for multilingual users), similarity
+    is the max of cosine(query) and cosine(embedding_query) per row — improves cross-lingual RAG.
 
     Returns (top_k entries, top_similarity_score).
     """
@@ -416,11 +420,18 @@ async def search_knowledge(
     if not all_k:
         return [], 0.0
 
-    query_embedding = embed_text(query)
+    q1 = embed_text(query)
+    q2: list[float] | None = None
+    eq = (embedding_query or "").strip()
+    if eq and eq != query.strip():
+        q2 = embed_text(eq)
+
     scored = []
     for k in all_k:
         if k.embedding:
-            sim = cosine_similarity(query_embedding, k.embedding)
+            sim = cosine_similarity(q1, k.embedding)
+            if q2 is not None:
+                sim = max(sim, cosine_similarity(q2, k.embedding))
             scored.append((sim, k))
     scored.sort(key=lambda x: x[0], reverse=True)
     if not scored:

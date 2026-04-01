@@ -7,17 +7,23 @@ from typing import Any, Dict, List, TypedDict
 from backend.config import MIN_SIMILARITY_THRESHOLD
 from backend.schemas.relay import PromptContext
 
-KNOWLEDGE_CONVERSATIONAL_SUFFIX = (
-    "You are a professional support assistant (ticket-bot quality: clear, polite, concise). "
-    "Answer ONLY using the knowledge blocks below plus this ticket thread. "
-    "Write in the same language the user is using. "
-    "Use a natural, conversational tone — not robotic. "
-    "Structure: lead with facts from main_content; use additional_context and behavior_notes "
-    "when they clearly help answer the question. "
-    "If the knowledge does not contain the answer, say briefly that you do not have that "
-    "specific information here and suggest more detail or a human agent — do not invent facts "
-    "or use outside/general training knowledge."
-)
+
+def _knowledge_suffix(user_language: str) -> str:
+    return (
+        f"User message language (respond in this language): {user_language}. "
+        "Respond in the same language as the user's message. "
+        "Use only the provided knowledge. Be natural and conversational. "
+        "Prioritize main_content first; use additional_context and behavior_notes only when they "
+        "clearly apply to the user's question. "
+        "For numbers, prices, and tiers: quote only values explicitly stated in main_content "
+        "(or additional_context when it directly answers the same question). "
+        "If the user asks for a tier or amount not listed in main_content, say it is not listed "
+        "and give the closest official options that appear in main_content — do not infer or "
+        "compute prices that are not written there. "
+        "If the question cannot be answered from the knowledge base, reply politely that the "
+        "information is not available and suggest contacting support. "
+        "Do not guess or use general knowledge."
+    )
 
 
 class BuiltPromptContext(TypedDict):
@@ -27,11 +33,12 @@ class BuiltPromptContext(TypedDict):
     top_similarity: float
 
 
-def _knowledge_system_prompt(base_prompt: str) -> str:
+def _knowledge_system_prompt(base_prompt: str, user_language: str) -> str:
     base = (base_prompt or "").strip()
+    suffix = _knowledge_suffix(user_language)
     if base:
-        return f"{base}\n\n{KNOWLEDGE_CONVERSATIONAL_SUFFIX}"
-    return KNOWLEDGE_CONVERSATIONAL_SUFFIX
+        return f"{base}\n\n{suffix}"
+    return suffix
 
 
 def build_prompt_context(
@@ -39,6 +46,7 @@ def build_prompt_context(
     knowledge_chunks: List[Dict[str, Any]],
     message_history: List[Dict[str, str]],
     top_similarity: float,
+    user_language: str = "en",
     min_confidence: float = MIN_SIMILARITY_THRESHOLD,
     max_chars: int = 3_200,
 ) -> BuiltPromptContext:
@@ -71,9 +79,10 @@ def build_prompt_context(
     injected = sum(_chunk_len(c) for c in selected_chunks)
 
     prompt_context = PromptContext(
-        system_prompt=_knowledge_system_prompt(system_prompt),
+        system_prompt=_knowledge_system_prompt(system_prompt, user_language),
         knowledge_chunks=selected_chunks,
         message_history=history,
+        user_language=user_language,
     )
 
     return BuiltPromptContext(

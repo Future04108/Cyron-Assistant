@@ -151,6 +151,19 @@ def detect_language_hint(text: str) -> str:
         return "ko"
     if any("\u0600" <= c <= "\u06ff" for c in t):
         return "ar"
+    # Spanish questions/pricing (before Latin keyword collisions with English)
+    if re.search(
+        r"[\u00bf\u00a1]|"
+        r"\b(cuánto|cuánta|cuántos|cuántas|cuanto|cuanta|cómo|dónde|qué|"
+        r"por\s+qué|precio|precios|cuesta|muchas\s+gracias|gracias)\b",
+        t,
+        re.IGNORECASE,
+    ):
+        return "es"
+    if re.search(r"\b(combien|prix|où|comment|pourquoi)\b", t, re.IGNORECASE):
+        return "fr"
+    if re.search(r"\b(quanto|preço|quanto\s+custa)\b", t, re.IGNORECASE):
+        return "pt"
     for pattern, code in _LANG_HINTS:
         if pattern.search(t):
             return code
@@ -184,3 +197,26 @@ def greeting_reply_for_language(lang: str) -> str:
 
 def kb_fallback_reply_for_language(lang: str) -> str:
     return KB_FALLBACK_REPLY.get(lang, KB_FALLBACK_REPLY["en"])
+
+
+_VERY_SHORT_ACK = re.compile(
+    r"^\s*("
+    r"ok+\b|okay\b|k\b|cool\b|nice\b|got\s+it\b|sounds\s+good\b|understood\b|"
+    r"vale\b|perfecto\b|perfect\b|great\b|awesome\b"
+    r")[\s!,.]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_very_short_ack_lightweight(text: str) -> bool:
+    """Short acknowledgements without a question — use minimal-token reply path."""
+    t = (text or "").strip()
+    if not t or len(t) > 44:
+        return False
+    if "?" in t or "¿" in t:
+        return False
+    if is_greeting_or_smalltalk(text):
+        return False
+    if _THANKS_ACK.match(t) or _VERY_SHORT_ACK.match(t):
+        return True
+    return False

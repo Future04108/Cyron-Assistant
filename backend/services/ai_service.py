@@ -1,4 +1,4 @@
-"""AI service using LiteLLM — knowledge path, lightweight greeting path."""
+"""AI service using LiteLLM — knowledge path and lightweight short replies."""
 
 from __future__ import annotations
 
@@ -34,7 +34,9 @@ def _build_knowledge_messages(prompt_context: PromptContext) -> List[Dict[str, s
         if behavior_notes:
             body_parts.append(f"behavior_notes:\n{behavior_notes}")
         parts.append(f"{header}\n" + "\n".join(body_parts))
-    knowledge_text = "Knowledge base (authoritative):\n\n" + "\n\n---\n\n".join(parts)
+    knowledge_text = "Knowledge base (authoritative — use only this for facts):\n\n" + "\n\n---\n\n".join(
+        parts
+    )
     messages.append({"role": "system", "content": knowledge_text})
 
     for msg in prompt_context.message_history:
@@ -93,6 +95,42 @@ def _extract_usage(response: Any) -> Tuple[int, int]:
     return prompt_tokens, completion_tokens
 
 
+_LIGHTWEIGHT_SHORT_SYSTEM = (
+    "You are a support bot. Reply in ONE short sentence in the same language as the user. "
+    "No knowledge base, no lists, under 25 words. Be friendly."
+)
+
+
+async def get_lightweight_short_reply(user_message: str) -> Tuple[str, int, int]:
+    """Minimal tokens for very short non-greeting follow-ups (no RAG)."""
+    api_key = config.openai_api_key
+    if not api_key:
+        raise AIServiceError("OPENAI_API_KEY is not configured.")
+    try:
+        response = await acompletion(
+            model=config.openai_model,
+            messages=[
+                {"role": "system", "content": _LIGHTWEIGHT_SHORT_SYSTEM},
+                {"role": "user", "content": (user_message or "").strip()[:300]},
+            ],
+            max_tokens=64,
+            temperature=0.35,
+            api_key=api_key,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.error("lightweight_short_failed", error=str(exc))
+        raise AIServiceError("Lightweight reply failed") from exc
+    reply = _extract_reply(response)
+    pt, ct = _extract_usage(response)
+    logger.info(
+        "ai_lightweight_short",
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        total_tokens=pt + ct,
+    )
+    return reply, pt, ct
+
+
 async def get_ai_response(
     prompt_context: PromptContext, max_tokens: int = 300
 ) -> Tuple[str, int, int]:
@@ -110,7 +148,7 @@ async def get_ai_response(
             model=config.openai_model,
             messages=messages,
             max_tokens=min(max_tokens, config.openai_max_tokens, 300),
-            temperature=0.25,
+            temperature=0.2,
             api_key=api_key,
         )
     except Exception as exc:  # pragma: no cover - provider-specific errors
@@ -127,6 +165,7 @@ async def get_ai_response(
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
         knowledge_chunks=len(prompt_context.knowledge_chunks),
+        user_language=prompt_context.user_language,
     )
 
     return reply, prompt_tokens, completion_tokens

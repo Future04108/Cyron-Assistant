@@ -17,17 +17,24 @@ from backend.services.limit_service import (
     check_monthly_tokens,
 )
 from backend.config import MIN_SIMILARITY_RETRIEVAL
-from backend.services.ai_service import AIServiceError, get_ai_response
+from backend.services.ai_service import (
+    AIServiceError,
+    get_ai_response,
+    get_lightweight_short_reply,
+)
 from backend.services.knowledge_service import search_knowledge, build_injection_chunk
 from backend.services.message_service import add_message, get_last_messages
 from backend.services.prompt_builder import build_prompt_context
 from backend.services.usage_service import log_usage
+from backend.services.retrieval_query import english_for_embedding_search
 from backend.services.response_routing import (
     detect_language_hint,
     greeting_reply_for_language,
     is_greeting_or_smalltalk,
+    is_very_short_ack_lightweight,
     kb_fallback_reply_for_language,
 )
+
 logger = structlog.get_logger()
 router = APIRouter(prefix="/relay", tags=["relay"])
 
@@ -114,13 +121,14 @@ async def relay_message(
             top_similarity = 0.0
             built: dict | None = None
 
-            # 6a. Greeting / small talk — templates only (no RAG, minimal tokens)
+            # 6a. Greeting / small talk — templates only (no RAG)
             if is_greeting_or_smalltalk(payload.content):
                 reply = greeting_reply_for_language(lang)
                 prompt_context = PromptContext(
                     system_prompt="",
                     knowledge_chunks=[],
                     message_history=[],
+                    user_language=lang,
                 )
                 logger.info(
                     "relay_path",
@@ -128,14 +136,44 @@ async def relay_message(
                     lang=lang,
                     guild_id=guild_id,
                 )
+            # 6b. Very short acks — lightweight LLM (no KB)
+            elif is_very_short_ack_lightweight(payload.content):
+                try:
+                    reply, prompt_tokens, completion_tokens = await get_lightweight_short_reply(
+                        payload.content
+                    )
+                except AIServiceError:
+                    reply = greeting_reply_for_language(lang)
+                    prompt_tokens = 0
+                    completion_tokens = 0
+                prompt_context = PromptContext(
+                    system_prompt="",
+                    knowledge_chunks=[],
+                    message_history=[],
+                    user_language=lang,
+                )
+                logger.info(
+                    "relay_path",
+                    path="lightweight_short",
+                    lang=lang,
+                    guild_id=guild_id,
+                )
             else:
-                # 6b. Semantic retrieval + knowledge-grounded or localized fallback
+                # English expansion improves retrieval when KB is English but user is not
+                emb_query = await english_for_embedding_search(payload.content)
+                if emb_query.strip() != payload.content.strip():
+                    logger.info(
+                        "relay_retrieval_embedding_expanded",
+                        guild_id=guild_id,
+                    )
+
                 knowledge_items, top_similarity = await search_knowledge(
                     session,
                     guild_id,
                     payload.content,
                     top_k=3,
                     min_score=MIN_SIMILARITY_RETRIEVAL,
+                    embedding_query=emb_query,
                 )
                 last_msgs = await get_last_messages(session, ticket.id, limit=6)
                 knowledge_chunks = [
@@ -149,6 +187,7 @@ async def relay_message(
                     knowledge_chunks,
                     message_history,
                     top_similarity=top_similarity,
+                    user_language=lang,
                 )
                 prompt_context = built["prompt_context"]
 
@@ -184,17 +223,13 @@ async def relay_message(
                         prompt_tokens = 0
                         completion_tokens = 0
 
-            # Low-confidence suggestion is shown in Discord embed footer by the bot
-
             injected_chars = built["injected_knowledge_chars"] if built else 0
             low_conf_out = built["low_confidence"] if built else False
             top_sim_out = float(built["top_similarity"]) if built else 0.0
 
-            # 8. Store assistant reply
             await add_message(session, ticket.id, "assistant", reply)
             await session.flush()
 
-            # 9. Usage logging with real token counts
             total_tokens = int(prompt_tokens) + int(completion_tokens)
             await log_usage(
                 session=session,
@@ -246,4 +281,3 @@ async def relay_message(
             user_id=payload.user_id,
         )
         raise HTTPException(status_code=500, detail="Internal server error") from e
-

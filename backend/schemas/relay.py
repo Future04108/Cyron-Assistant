@@ -20,6 +20,10 @@ class PromptContext(BaseModel):
     system_prompt: str = ""
     knowledge_chunks: list[dict[str, Any]] = Field(default_factory=list)
     message_history: list[dict[str, str]] = Field(default_factory=list)
+    user_language: str = Field(
+        default="en",
+        description="Detected language code for assistant reply language",
+    )
 
 
 class TokenUsage(BaseModel):
