@@ -172,7 +172,7 @@ def is_greeting_or_smalltalk(text: str) -> bool:
         return True
     if _HELP_OPENER.match(t) and len(re.findall(r"\w+", t.lower())) <= 6:
         return True
-    if len(t) <= 24 and re.match(r"^[\s\w\u00c0-\u024f!?.,;:'\"+\-👍🙏❤️✅]+$', t):
+    if len(t) <= 24 and re.match(r"^[\s\w\u00c0-\u024f!?.,;:'\"+\-👍🙏❤️✅]+$", t):
         if len(re.findall(r"\w+", t)) <= 4:
             return bool(_THANKS_ACK.match(t) or _GREETING_ONLY.match(t))
     return False
