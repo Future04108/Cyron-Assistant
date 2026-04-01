@@ -39,6 +39,9 @@ async def list_guild_knowledge(
             guild_id=k.guild_id,
             title=k.title,
             content=k.content,
+            main_content=k.main_content,
+            additional_context=k.additional_context,
+            behavior_notes=k.behavior_notes,
             created_at=k.created_at.isoformat() if k.created_at else "",
         )
         for k in items
@@ -58,7 +61,14 @@ async def create_guild_knowledge(
 
     try:
         created = await create_knowledge_with_chunking(
-            session, guild_id, body.title, body.content, plan=guild.plan
+            session,
+            guild_id,
+            body.title,
+            body.content,
+            main_content=body.main_content,
+            additional_context=body.additional_context,
+            behavior_notes=body.behavior_notes,
+            plan=guild.plan,
         )
     except EntryTooLargeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -72,6 +82,9 @@ async def create_guild_knowledge(
         guild_id=knowledge.guild_id,
         title=knowledge.title,
         content=knowledge.content,
+        main_content=knowledge.main_content,
+        additional_context=knowledge.additional_context,
+        behavior_notes=knowledge.behavior_notes,
         created_at=knowledge.created_at.isoformat() if knowledge.created_at else "",
     )
 
@@ -95,6 +108,9 @@ async def get_guild_knowledge(
         guild_id=knowledge.guild_id,
         title=knowledge.title,
         content=knowledge.content,
+        main_content=knowledge.main_content,
+        additional_context=knowledge.additional_context,
+        behavior_notes=knowledge.behavior_notes,
         created_at=knowledge.created_at.isoformat() if knowledge.created_at else "",
     )
 
@@ -113,7 +129,14 @@ async def update_guild_knowledge(
 
     try:
         knowledge = await update_knowledge(
-            session, knowledge_id, guild_id, title=body.title, content=body.content
+            session,
+            knowledge_id,
+            guild_id,
+            title=body.title,
+            content=body.content,
+            main_content=body.main_content,
+            additional_context=body.additional_context,
+            behavior_notes=body.behavior_notes,
         )
     except EntryTooLargeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -127,6 +150,9 @@ async def update_guild_knowledge(
         guild_id=knowledge.guild_id,
         title=knowledge.title,
         content=knowledge.content,
+        main_content=knowledge.main_content,
+        additional_context=knowledge.additional_context,
+        behavior_notes=knowledge.behavior_notes,
         created_at=knowledge.created_at.isoformat() if knowledge.created_at else "",
     )
 

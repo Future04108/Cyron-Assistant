@@ -1,6 +1,7 @@
 """Message relay endpoint - Phase 2 full flow."""
 
 import structlog
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
@@ -18,7 +19,7 @@ from backend.services.limit_service import (
 )
 from backend.config import MIN_SIMILARITY_RETRIEVAL, MIN_SIMILARITY_THRESHOLD
 from backend.services.ai_service import AIServiceError, get_ai_response
-from backend.services.knowledge_service import search_knowledge
+from backend.services.knowledge_service import search_knowledge, build_injection_chunk
 from backend.services.message_service import add_message, get_last_messages
 from backend.services.prompt_builder import build_prompt_context
 from backend.services.usage_service import log_usage
@@ -113,9 +114,7 @@ async def relay_message(
                 min_score=MIN_SIMILARITY_RETRIEVAL,
             )
             last_msgs = await get_last_messages(session, ticket.id, limit=8)
-            knowledge_chunks = [
-                {"title": k.title, "content": k.content} for k in knowledge_items
-            ]
+            knowledge_chunks = [build_injection_chunk(k, payload.content) for k in knowledge_items]
             message_history = [
                 {"role": m.role, "content": m.content} for m in last_msgs
             ]
@@ -128,11 +127,15 @@ async def relay_message(
             prompt_context = built["prompt_context"]
 
             # 7. Call AI model via LiteLLM
+            is_short_message = len(payload.content.strip()) <= 60 or len(
+                re.findall(r"\w+", payload.content)
+            ) <= 10
+            max_response_tokens = 180 if is_short_message else 400
             prompt_tokens = 0
             completion_tokens = 0
             try:
                 reply, prompt_tokens, completion_tokens = await get_ai_response(
-                    prompt_context, max_tokens=400
+                    prompt_context, max_tokens=max_response_tokens
                 )
             except AIServiceError as e:
                 logger.error(

@@ -23,6 +23,9 @@ class Knowledge(Base):
     )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    main_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    additional_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    behavior_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Embedding: 384 dimensions for all-MiniLM-L6-v2
     embedding: Mapped[list[float] | None] = mapped_column(ARRAY(Float), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

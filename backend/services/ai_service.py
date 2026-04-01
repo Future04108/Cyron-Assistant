@@ -9,6 +9,7 @@ from litellm import acompletion
 
 from backend.config import config
 from backend.schemas.relay import PromptContext
+from backend.services.prompt_builder import KNOWLEDGE_NOT_FOUND_REPLY
 
 logger = structlog.get_logger(__name__)
 
@@ -18,44 +19,30 @@ class AIServiceError(Exception):
 
 
 def _build_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
-    """Convert PromptContext into OpenAI-style chat messages."""
-    messages: list[dict[str, str]] = []
+    """Convert PromptContext into OpenAI-style chat messages (knowledge path only)."""
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": prompt_context.system_prompt},
+    ]
 
-    # Lightweight path: no relevant knowledge retrieved; keep prompt minimal.
-    lightweight = len(prompt_context.knowledge_chunks) == 0
-    if lightweight:
-        messages.append(
-            {
-                "role": "system",
-                "content": prompt_context.system_prompt
-                or "You are a concise support assistant. Answer briefly and clearly.",
-            }
-        )
-    else:
-        # System prompt with safety and behavior instructions
-        messages.append({"role": "system", "content": prompt_context.system_prompt})
+    parts: list[str] = []
+    for idx, chunk in enumerate(prompt_context.knowledge_chunks, start=1):
+        title = str(chunk.get("title", "")).strip()
+        main_content = str(chunk.get("main_content", chunk.get("content", ""))).strip()
+        additional_context = str(chunk.get("additional_context", "")).strip()
+        behavior_notes = str(chunk.get("behavior_notes", "")).strip()
+        header = f"[{idx}] {title}" if title else f"[{idx}]"
+        body_parts = [f"Main: {main_content}"]
+        if additional_context:
+            body_parts.append(f"Context: {additional_context}")
+        if behavior_notes:
+            body_parts.append(f"Behavior: {behavior_notes}")
+        parts.append(f"{header}\n" + "\n".join(body_parts))
+    knowledge_text = "KB:\n" + "\n\n".join(parts)
+    messages.append({"role": "system", "content": knowledge_text})
 
-    # Encode knowledge chunks into a single system message to reduce tokens
-    if not lightweight and prompt_context.knowledge_chunks:
-        parts: list[str] = []
-        for idx, chunk in enumerate(prompt_context.knowledge_chunks, start=1):
-            title = str(chunk.get("title", "")).strip()
-            content = str(chunk.get("content", "")).strip()
-            header = f"[{idx}] {title}" if title else f"[{idx}]"
-            parts.append(f"{header}\n{content}")
-        knowledge_text = (
-            "Relevant knowledge (authoritative for this server - use only this plus the "
-            "conversation; do not use outside/web sources):\n\n"
-            + "\n\n---\n\n".join(parts)
-        )
-        messages.append({"role": "system", "content": knowledge_text})
-
-    # Conversation history (trim harder for lightweight prompts)
-    history = prompt_context.message_history[-3:] if lightweight else prompt_context.message_history
-    for msg in history:
+    for msg in prompt_context.message_history:
         role = msg.get("role", "user")
         content = msg.get("content", "")
-        # Guard against empty content; OpenAI expects non-empty strings
         if not isinstance(content, str):
             content = str(content)
         messages.append({"role": role, "content": content})
@@ -115,20 +102,28 @@ async def get_ai_response(
     prompt_context: PromptContext, max_tokens: int = 400
 ) -> Tuple[str, int, int]:
     """
-    Call the AI model and return (reply, prompt_tokens, completion_tokens).
+    Call the model only when knowledge chunks are present; otherwise return the
+    fixed not-found reply with zero token usage (no generic model fallback).
     """
+    if not prompt_context.knowledge_chunks:
+        logger.info(
+            "ai_response_skipped_no_knowledge",
+            reason="no_sufficient_knowledge_chunks",
+        )
+        return KNOWLEDGE_NOT_FOUND_REPLY, 0, 0
+
+    messages = _build_messages(prompt_context)
+
     api_key = config.openai_api_key
     if not api_key:
         raise AIServiceError("OPENAI_API_KEY is not configured.")
-
-    messages = _build_messages(prompt_context)
 
     try:
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
             max_tokens=min(max_tokens, config.openai_max_tokens),
-            temperature=config.openai_temperature,
+            temperature=0.0,
             api_key=api_key,
         )
     except Exception as exc:  # pragma: no cover - provider-specific errors
@@ -144,7 +139,7 @@ async def get_ai_response(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
+        knowledge_chunks=len(prompt_context.knowledge_chunks),
     )
 
     return reply, prompt_tokens, completion_tokens
-

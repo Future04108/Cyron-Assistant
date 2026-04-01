@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 from typing import List, Tuple
 
 import structlog
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import MIN_SIMILARITY_THRESHOLD
 from backend.models.knowledge import Knowledge
+from backend.services.knowledge_structurer import structure_knowledge_entry
 from backend.utils.embeddings import embed_text, cosine_similarity
 from backend.utils.text_splitter import chunk_knowledge
 
@@ -24,6 +26,21 @@ KNOWLEDGE_CHAR_LIMITS: dict[str, int] = {
 }
 
 MAX_ENTRY_CHARS = 6_000
+MAX_MAIN_CONTENT_CHARS = 2_200
+MAX_ADDITIONAL_CONTEXT_CHARS = 900
+MAX_BEHAVIOR_NOTES_CHARS = 500
+
+SECTION_HEADING_ALIASES: dict[str, tuple[str, ...]] = {
+    "main_content": ("main", "main content", "content", "details", "information"),
+    "additional_context": (
+        "additional",
+        "additional context",
+        "context",
+        "extra context",
+        "more info",
+    ),
+    "behavior_notes": ("behavior", "behavior notes", "notes", "note", "response style"),
+}
 
 
 class KnowledgeLimitError(Exception):
@@ -36,6 +53,126 @@ class EntryTooLargeError(KnowledgeLimitError):
 
 class GuildTotalLimitError(KnowledgeLimitError):
     """Raised when guild total knowledge characters exceed plan limit."""
+
+
+def _normalize_whitespace(value: str) -> str:
+    compact = value.replace("\r\n", "\n").replace("\r", "\n")
+    compact = re.sub(r"[ \t]+", " ", compact)
+    compact = re.sub(r"\n{3,}", "\n\n", compact)
+    return compact.strip()
+
+
+def _remove_redundant_lines(text: str) -> str:
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if not normalized:
+            cleaned.append("")
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(line.strip())
+    return "\n".join(cleaned).strip()
+
+
+def _extract_heading_key(line: str) -> str | None:
+    normalized = line.strip().strip("#").strip().strip(":").lower()
+    for key, aliases in SECTION_HEADING_ALIASES.items():
+        if normalized in aliases:
+            return key
+    return None
+
+
+def _smart_parse_structured_content(
+    title: str,
+    content: str,
+) -> tuple[str, str, str | None, str | None]:
+    cleaned_title = _normalize_whitespace(title) or "Knowledge Entry"
+    cleaned_content = _remove_redundant_lines(_normalize_whitespace(content))
+
+    sections: dict[str, list[str]] = {
+        "main_content": [],
+        "additional_context": [],
+        "behavior_notes": [],
+    }
+    current_key = "main_content"
+
+    inline_patterns = {
+        "additional_context": re.compile(r"^(additional|additional context|context)\s*:\s*", re.I),
+        "behavior_notes": re.compile(r"^(behavior|behavior notes|note|notes)\s*:\s*", re.I),
+    }
+
+    for raw_line in cleaned_content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            sections[current_key].append("")
+            continue
+
+        heading_key = _extract_heading_key(line)
+        if heading_key:
+            current_key = heading_key
+            continue
+
+        switched = False
+        for key, pattern in inline_patterns.items():
+            if pattern.match(line):
+                current_key = key
+                line = pattern.sub("", line).strip()
+                switched = True
+                break
+
+        if line:
+            sections[current_key].append(line)
+        elif switched:
+            continue
+
+    main_content = "\n".join(sections["main_content"]).strip()
+    additional_context = "\n".join(sections["additional_context"]).strip() or None
+    behavior_notes = "\n".join(sections["behavior_notes"]).strip() or None
+
+    if not main_content:
+        paras = [p.strip() for p in re.split(r"\n\s*\n", cleaned_content) if p.strip()]
+        main_content = paras[0] if paras else cleaned_content
+        additional_context = (
+            "\n\n".join(paras[1:]).strip() if len(paras) > 1 and not additional_context else additional_context
+        )
+
+    return cleaned_title, main_content, additional_context, behavior_notes
+
+
+def _truncate(value: str | None, limit: int) -> str | None:
+    if not value:
+        return None
+    return value[:limit].strip()
+
+
+def build_injection_chunk(knowledge: Knowledge, query: str) -> dict[str, str]:
+    """Build minimal retrieval chunk with relevance-aware optional fields."""
+    _, parsed_main, parsed_additional, parsed_notes = _smart_parse_structured_content(
+        knowledge.title,
+        knowledge.content,
+    )
+    main_content = (knowledge.main_content or parsed_main or knowledge.content).strip()
+    additional_context = (knowledge.additional_context or parsed_additional or "").strip()
+    behavior_notes = (knowledge.behavior_notes or parsed_notes or "").strip()
+
+    query_terms = {t for t in re.findall(r"[a-z0-9]{3,}", query.lower())}
+    optional_pool = f"{additional_context}\n{behavior_notes}".lower()
+    optional_relevant = bool(query_terms and any(term in optional_pool for term in query_terms))
+
+    chunk: dict[str, str] = {
+        "title": knowledge.title,
+        "main_content": _truncate(main_content, MAX_MAIN_CONTENT_CHARS) or "",
+    }
+    if optional_relevant and additional_context:
+        chunk["additional_context"] = _truncate(
+            additional_context, MAX_ADDITIONAL_CONTEXT_CHARS
+        ) or ""
+    if optional_relevant and behavior_notes:
+        chunk["behavior_notes"] = _truncate(behavior_notes, MAX_BEHAVIOR_NOTES_CHARS) or ""
+    return chunk
 
 
 async def get_knowledge_count(session: AsyncSession, guild_id: int) -> int:
@@ -60,7 +197,10 @@ async def create_knowledge_with_chunking(
     session: AsyncSession,
     guild_id: int,
     title: str,
-    content: str,
+    content: str = "",
+    main_content: str | None = None,
+    additional_context: str | None = None,
+    behavior_notes: str | None = None,
     plan: str = "free",
 ) -> List[Knowledge]:
     """
@@ -69,7 +209,10 @@ async def create_knowledge_with_chunking(
     Returns list of created Knowledge rows (one per chunk).
     Raises KnowledgeLimitError subclasses if limits are violated.
     """
-    entry_len = len(title) + len(content)
+    raw_text = "\n\n".join(
+        p for p in (main_content or "", additional_context or "", behavior_notes or "", content) if p
+    )
+    entry_len = len(title) + len(raw_text)
     if entry_len > MAX_ENTRY_CHARS:
         raise EntryTooLargeError(
             "Knowledge entry exceeds 6000 characters. Please shorten or split."
@@ -80,7 +223,28 @@ async def create_knowledge_with_chunking(
 
     current_total = await get_knowledge_total_chars(session, guild_id)
 
-    chunks = chunk_knowledge(title, content)
+    structured = await structure_knowledge_entry(
+        title=title,
+        content=content,
+        main_content=main_content,
+        additional_context=additional_context,
+        behavior_notes=behavior_notes,
+    )
+    cleaned_title = structured["title"] or "Knowledge Entry"
+    main_content = structured["main_content"] or ""
+    additional_context = structured["additional_context"]
+    behavior_notes = structured["behavior_notes"]
+    normalized_content = "\n\n".join(
+        part
+        for part in (
+            main_content,
+            f"Additional Context:\n{additional_context}" if additional_context else "",
+            f"Behavior Notes:\n{behavior_notes}" if behavior_notes else "",
+        )
+        if part
+    )
+
+    chunks = chunk_knowledge(cleaned_title, normalized_content)
     new_chars = sum(len(t) + len(c) for t, c in chunks)
 
     if current_total + new_chars > total_limit:
@@ -95,12 +259,18 @@ async def create_knowledge_with_chunking(
         )
 
     created: list[Knowledge] = []
-    for idx, (chunk_title, chunk_content) in enumerate(chunks, start=1):
-        embedding = embed_text(f"{chunk_title}\n{chunk_content}")
+    for chunk_title, chunk_content in chunks:
+        embedding_source = (
+            f"{chunk_title}\n{main_content}\n{additional_context or ''}\n{behavior_notes or ''}"
+        )
+        embedding = embed_text(embedding_source)
         knowledge = Knowledge(
             guild_id=guild_id,
             title=chunk_title,
             content=chunk_content,
+            main_content=main_content,
+            additional_context=additional_context,
+            behavior_notes=behavior_notes,
             embedding=embedding,
         )
         session.add(knowledge)
@@ -116,6 +286,8 @@ async def create_knowledge_with_chunking(
         entry_len=entry_len,
         new_chars=new_chars,
         total_after=current_total + new_chars,
+        has_additional_context=bool(additional_context),
+        has_behavior_notes=bool(behavior_notes),
     )
 
     return created
@@ -150,14 +322,37 @@ async def update_knowledge(
     guild_id: int,
     title: str | None = None,
     content: str | None = None,
+    main_content: str | None = None,
+    additional_context: str | None = None,
+    behavior_notes: str | None = None,
 ) -> Knowledge | None:
     """Update single knowledge entry with validation."""
     k = await get_knowledge_by_id(session, knowledge_id, guild_id)
     if not k:
         return None
 
-    new_title = title if title is not None else k.title
-    new_content = content if content is not None else k.content
+    incoming_title = title if title is not None else (k.title or "Knowledge Entry")
+    incoming_content = content if content is not None else (k.content or "")
+    structured = await structure_knowledge_entry(
+        title=incoming_title,
+        content=incoming_content,
+        main_content=main_content if main_content is not None else k.main_content,
+        additional_context=additional_context if additional_context is not None else k.additional_context,
+        behavior_notes=behavior_notes if behavior_notes is not None else k.behavior_notes,
+    )
+    new_title = structured["title"] or "Knowledge Entry"
+    main_content = structured["main_content"] or ""
+    additional_context = structured["additional_context"]
+    behavior_notes = structured["behavior_notes"]
+    new_content = "\n\n".join(
+        part
+        for part in (
+            main_content,
+            f"Additional Context:\n{additional_context}" if additional_context else "",
+            f"Behavior Notes:\n{behavior_notes}" if behavior_notes else "",
+        )
+        if part
+    )
 
     entry_len = len(new_title) + len(new_content)
     if entry_len > MAX_ENTRY_CHARS:
@@ -182,7 +377,12 @@ async def update_knowledge(
 
     k.title = new_title
     k.content = new_content
-    k.embedding = embed_text(f"{k.title}\n{k.content}")
+    k.main_content = main_content
+    k.additional_context = additional_context
+    k.behavior_notes = behavior_notes
+    k.embedding = embed_text(
+        f"{k.title}\n{k.main_content}\n{k.additional_context or ''}\n{k.behavior_notes or ''}"
+    )
     await session.flush()
     return k
 
@@ -244,21 +444,6 @@ async def search_knowledge(
         top_items = filtered[:top_k]
         top_sim = top_items[0][0]
         return [k for _, k in top_items], float(top_sim)
-
-    # Best-effort: if the guild has knowledge but nothing met min_score (query wording
-    # mismatch, short questions, etc.), still return the top matches so the model can
-    # ground on your KB instead of generic training data.
-    fallback = scored[:top_k]
-    if fallback:
-        top_sim = float(fallback[0][0])
-        logger.info(
-            "search_knowledge_fallback_best_effort",
-            guild_id=guild_id,
-            top_similarity=top_sim,
-            min_score=min_score,
-            returned=len(fallback),
-        )
-        return [k for _, k in fallback], top_sim
 
     return [], top_raw_similarity
 
