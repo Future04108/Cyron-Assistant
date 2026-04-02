@@ -24,6 +24,10 @@ class PromptContext(BaseModel):
         default="en",
         description="Detected language code for assistant reply language",
     )
+    retrieval_mode: str = Field(
+        default="none",
+        description="none | low | moderate | high — KB match tier for this turn",
+    )
 
 
 class TokenUsage(BaseModel):

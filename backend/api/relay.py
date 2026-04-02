@@ -21,6 +21,8 @@ from backend.services.ai_service import (
     AIServiceError,
     get_ai_response,
     get_lightweight_short_reply,
+    get_natural_conversational_reply,
+    get_support_reply_without_kb_chunks,
 )
 from backend.services.knowledge_service import search_knowledge, build_injection_chunk
 from backend.services.message_service import add_message, get_last_messages
@@ -30,6 +32,7 @@ from backend.services.retrieval_query import english_for_embedding_search
 from backend.services.response_routing import (
     detect_language_hint,
     greeting_reply_for_language,
+    is_conversational_without_kb,
     is_greeting_or_smalltalk,
     is_very_short_ack_lightweight,
     kb_fallback_reply_for_language,
@@ -129,6 +132,7 @@ async def relay_message(
                     knowledge_chunks=[],
                     message_history=[],
                     user_language=lang,
+                    retrieval_mode="none",
                 )
                 logger.info(
                     "relay_path",
@@ -151,10 +155,42 @@ async def relay_message(
                     knowledge_chunks=[],
                     message_history=[],
                     user_language=lang,
+                    retrieval_mode="none",
                 )
                 logger.info(
                     "relay_path",
                     path="lightweight_short",
+                    lang=lang,
+                    guild_id=guild_id,
+                )
+            elif is_conversational_without_kb(payload.content):
+                last_msgs = await get_last_messages(session, ticket.id, limit=6)
+                message_history = [
+                    {"role": m.role, "content": m.content} for m in last_msgs
+                ]
+                try:
+                    reply, prompt_tokens, completion_tokens = (
+                        await get_natural_conversational_reply(
+                            guild.system_prompt or "",
+                            message_history,
+                            payload.content,
+                            lang,
+                        )
+                    )
+                except AIServiceError:
+                    reply = greeting_reply_for_language(lang)
+                    prompt_tokens = 0
+                    completion_tokens = 0
+                prompt_context = PromptContext(
+                    system_prompt="",
+                    knowledge_chunks=[],
+                    message_history=message_history,
+                    user_language=lang,
+                    retrieval_mode="none",
+                )
+                logger.info(
+                    "relay_path",
+                    path="natural_conversational",
                     lang=lang,
                     guild_id=guild_id,
                 )
@@ -171,7 +207,7 @@ async def relay_message(
                     session,
                     guild_id,
                     payload.content,
-                    top_k=3,
+                    top_k=4,
                     min_score=MIN_SIMILARITY_RETRIEVAL,
                     embedding_query=emb_query,
                 )
@@ -192,24 +228,40 @@ async def relay_message(
                 prompt_context = built["prompt_context"]
 
                 if not prompt_context.knowledge_chunks:
-                    reply = kb_fallback_reply_for_language(lang)
+                    try:
+                        (
+                            reply,
+                            prompt_tokens,
+                            completion_tokens,
+                        ) = await get_support_reply_without_kb_chunks(
+                            guild.system_prompt or "",
+                            message_history,
+                            payload.content,
+                            lang,
+                        )
+                    except AIServiceError:
+                        reply = kb_fallback_reply_for_language(lang)
+                        prompt_tokens = 0
+                        completion_tokens = 0
                     logger.info(
                         "relay_path",
-                        path="kb_fallback",
+                        path="support_no_kb_llm",
                         lang=lang,
                         top_similarity=top_similarity,
+                        retrieval_mode="none",
                         guild_id=guild_id,
                     )
                 else:
                     try:
                         reply, prompt_tokens, completion_tokens = await get_ai_response(
-                            prompt_context, max_tokens=300
+                            prompt_context, max_tokens=400
                         )
                         logger.info(
                             "relay_path",
                             path="knowledge_rag",
                             lang=lang,
                             top_similarity=top_similarity,
+                            retrieval_mode=built["retrieval_mode"],
                             guild_id=guild_id,
                         )
                     except AIServiceError as e:

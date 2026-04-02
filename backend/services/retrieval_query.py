@@ -30,6 +30,18 @@ def should_expand_for_english_embedding(text: str) -> bool:
         return True
     if _SPANISH_Q.search(t):
         return True
+    for c in t:
+        o = ord(c)
+        if (
+            0x0400 <= o <= 0x04FF
+            or 0x0600 <= o <= 0x06FF
+            or 0x0590 <= o <= 0x05FF
+            or 0x4E00 <= o <= 0x9FFF
+            or 0x3040 <= o <= 0x30FF
+            or 0x31F0 <= o <= 0x31FF
+            or 0xAC00 <= o <= 0xD7A3
+        ):
+            return True
     return False
 
 

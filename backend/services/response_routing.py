@@ -1,4 +1,6 @@
-"""Greeting/small-talk detection, language hints, and template replies (no web, minimal tokens)."""
+"""Greeting/small-talk detection, language hints, and template replies (no web, minimal tokens).
+Vector match tiers (high / moderate / low / fallback) live in backend.config and prompt_builder.
+"""
 
 from __future__ import annotations
 
@@ -220,3 +222,56 @@ def is_very_short_ack_lightweight(text: str) -> bool:
     if _THANKS_ACK.match(t) or _VERY_SHORT_ACK.match(t):
         return True
     return False
+
+
+# Substantive support topics — do not treat as "meta" conversational-only.
+_SUBSTANTIVE_TOPIC = re.compile(
+    r"\b("
+    r"bill|billing|invoice|refund|charge|charged|payment|pay|paypal|stripe|card|"
+    r"subscription|cancel|renew|plan|tier|price|cost|discount|coupon|promo|"
+    r"order|shipping|delivery|tracking|return|warranty|"
+    r"account|login|log\s*in|password|email|verify|verification|ban|mute|kick|"
+    r"error|bug|crash|lag|down|broken|not\s+working|doesn'?t\s+work|"
+    r"how\s+to|where\s+is|when\s+does|why\s+is|what\s+is\s+the|"
+    r"robux|discord|nitro|ticket|role|channel|server\s+boost"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_CONVERSATIONAL_HELP_ONLY = re.compile(
+    r"^\s*("
+    r"(will|would|can|could)\s+you\s+help(\s+me|\s+us)?(\s+please)?\b"
+    r"|(will|would)\s+some(one|body)\s+help\s+me\b"
+    r"|do\s+you\s+speak\s+[\w\-]+\b"
+    r"|are\s+you\s+(a\s+)?(real|human|a\s+bot|there|awake|available)\b"
+    r"|is\s+any(one|body)\s+(there|here|around)\b"
+    r"|can\s+i\s+(ask|get|have)\s+(you\s+for\s+)?(some\s+)?help\b"
+    r"|could\s+i\s+(get|have)\s+(some\s+)?help\b"
+    r"|any(one|body)\s+there\b"
+    r"|hey[\s,]+(can|could)\s+you\s+help\b"
+    r"|¿puedes\s+ayudarme\b"
+    r"|peux-tu\s+m['']aider\b"
+    r"|kannst\s+du\s+mir\s+helfen\b"
+    r"|puoi\s+aiutarmi\b"
+    r"|você\s+pode\s+me\s+ajudar\b"
+    r")[\s\?！!\.…]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_conversational_without_kb(text: str) -> bool:
+    """Meta / rapport messages answerable without retrieved articles (e.g. 'Will you help me?')."""
+    t = (text or "").strip()
+    if not t or len(t) > 180:
+        return False
+    if _SUBSTANTIVE_TOPIC.search(t):
+        return False
+    if is_greeting_or_smalltalk(text):
+        return False
+    if is_very_short_ack_lightweight(text):
+        return False
+    if re.match(
+        r"^\s*i\s+need\s+help(\s+please)?\s*[\?.!…]*\s*$", t, re.IGNORECASE
+    ) or re.match(r"^\s*need\s+help\s*[\?.!…]*\s*$", t, re.IGNORECASE):
+        return True
+    return bool(_CONVERSATIONAL_HELP_ONLY.match(t))
