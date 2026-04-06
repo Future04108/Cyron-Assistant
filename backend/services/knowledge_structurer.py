@@ -21,6 +21,9 @@ logger = structlog.get_logger(__name__)
 
 STRUCTURE_MODEL = "gpt-4o-mini"
 DEDUP_SIMILARITY_THRESHOLD = 0.92
+# Coherent dashboard rows: at most 2 stored segments; prefer large meaningful blocks.
+MAX_LOGICAL_CHUNKS: int = 2
+MAX_UNIT_CHARS: int = 1100
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -199,48 +202,112 @@ def _extract_json_array(text: str, key: str) -> list[Any] | None:
     return v if isinstance(v, list) else None
 
 
-def _heuristic_atomic_units(raw: str, title: str) -> list[str]:
-    """Fallback decomposition: paragraphs / sentences."""
-    cleaned = _normalize_whitespace(raw)
-    parts = [p.strip() for p in re.split(r"\n\s*\n+", cleaned) if p.strip()]
-    if not parts:
-        return [_normalize_whitespace(title + "\n\n" + raw)[:4000]]
-    out: list[str] = []
-    for p in parts:
-        if len(p) > 1200:
-            out.extend(
-                x.strip()
-                for x in re.split(r"(?<=[.!?])\s+", p)
-                if x.strip() and len(x.strip()) > 20
-            ) or [p[:1200]]
-        else:
-            out.append(p)
-    return out[:24] or [_normalize_whitespace(raw)[:4000]]
+def _find_break_near(text: str, target: int) -> int:
+    """Prefer splitting at paragraph, then line, then sentence; fallback to target."""
+    n = len(text)
+    if n <= 1:
+        return n
+    lo = max(1, min(target, n - 1))
+    search_range = range(lo, max(0, lo - 800), -1)
+    for i in search_range:
+        if i < n - 1 and text[i : i + 2] == "\n\n":
+            return i + 2
+    for i in search_range:
+        if i < n and text[i] == "\n":
+            return i + 1
+    for sep in (". ", "! ", "? "):
+        pos = text.rfind(sep, max(0, lo - 400), lo + 200)
+        if pos != -1:
+            return pos + len(sep)
+    return lo
 
 
-async def decompose_raw_to_atomic_units(raw_composite: str, title: str) -> list[str]:
+def split_into_at_most_two(text: str, max_chars: int = MAX_UNIT_CHARS) -> list[str]:
+    """Split only when a single block exceeds max_chars; at most two parts; prefer natural breaks."""
+    t = _normalize_whitespace(text)
+    if not t:
+        return []
+    if len(t) <= max_chars:
+        return [t]
+    mid = len(t) // 2
+    br = _find_break_near(t, mid)
+    br = max(1, min(br, len(t) - 1))
+    a, b = t[:br].strip(), t[br:].strip()
+    if not a:
+        return [b] if b else []
+    if not b:
+        return [a]
+    return [a, b]
+
+
+def collapse_units_to_max_two(
+    units: list[str],
+    *,
+    max_chunks: int = MAX_LOGICAL_CHUNKS,
+    max_chars: int = MAX_UNIT_CHARS,
+) -> list[str]:
     """
-    Split raw user input into atomic semantic units (one concept per chunk).
-    Uses gpt-4o-mini; falls back to heuristic split without API.
+    Merge over-fragmented segments into at most `max_chunks` coherent blocks.
+    Respects paragraph boundaries when merging; only splits when a block exceeds max_chars.
+    """
+    cleaned = [_normalize_whitespace(str(u)) for u in units if str(u).strip()]
+    if not cleaned:
+        return []
+    while len(cleaned) > max_chunks:
+        best_i = 0
+        best_score = len(cleaned[0]) + len(cleaned[1])
+        for i in range(len(cleaned) - 1):
+            s = len(cleaned[i]) + len(cleaned[i + 1])
+            if s < best_score:
+                best_score = s
+                best_i = i
+        merged = cleaned[best_i] + "\n\n" + cleaned[best_i + 1]
+        cleaned = cleaned[:best_i] + [merged] + cleaned[best_i + 2 :]
+
+    final: list[str] = []
+    for block in cleaned:
+        if len(block) <= max_chars:
+            final.append(block)
+        else:
+            final.extend(split_into_at_most_two(block, max_chars))
+    while len(final) > max_chunks:
+        final = [final[0], "\n\n".join(final[1:])]
+    return [x for x in final if x][:max_chunks]
+
+
+def _heuristic_logical_units(raw: str, title: str) -> list[str]:
+    """Paragraph-first segmentation; no sentence-level fragmentation."""
+    cleaned = _normalize_whitespace(raw)
+    if not cleaned:
+        return [_normalize_whitespace(title)[:4000]]
+    paras = [p.strip() for p in re.split(r"\n\s*\n+", cleaned) if p.strip()]
+    if not paras:
+        return collapse_units_to_max_two([cleaned])
+    return collapse_units_to_max_two(paras)
+
+
+async def decompose_raw_to_logical_units(raw_composite: str, title: str) -> list[str]:
+    """
+    Split into at most two coherent logical units for dashboard + retrieval.
+    Prefer one unit; split only for length or clearly separate topics. Paragraph-aware.
     """
     raw_composite = _normalize_whitespace(raw_composite)
     if not raw_composite:
         return [_normalize_whitespace(title)]
 
     if not config.openai_api_key:
-        units = _heuristic_atomic_units(raw_composite, title)
-        logger.info(
-            "ingest_decompose",
-            path="heuristic",
-            units=len(units),
-        )
+        units = _heuristic_logical_units(raw_composite, title)
+        logger.info("ingest_decompose", path="heuristic", units=len(units))
         return units
 
     prompt = (
-        "Split the following knowledge text into atomic semantic units. "
-        "Each unit must express ONE clear concept or fact that can stand alone for retrieval. "
-        "Do not merge unrelated ideas. Preserve original language. "
-        'Return strict JSON only: {"units": ["...", ...]} with at least one string.'
+        f"Divide the text into at most {MAX_LOGICAL_CHUNKS} sections for a knowledge base dashboard. "
+        "PREFER A SINGLE SECTION if the text is one topic (even several paragraphs). "
+        f"Only use two sections if (a) there are clearly unrelated topics, OR (b) a single section would "
+        f"exceed ~{MAX_UNIT_CHARS} characters. "
+        "Respect paragraph and heading boundaries — never split mid-sentence for no reason. "
+        "Do not produce many tiny fragments. Preserve original language. "
+        f'Return strict JSON only: {{"units": ["...", ...]}} with 1–{MAX_LOGICAL_CHUNKS} strings.'
     )
     try:
         response = await acompletion(
@@ -252,7 +319,7 @@ async def decompose_raw_to_atomic_units(raw_composite: str, title: str) -> list[
                 },
                 {"role": "user", "content": f"{prompt}\n\nTITLE:\n{title}\n\nTEXT:\n{raw_composite[:12000]}"},
             ],
-            max_tokens=1200,
+            max_tokens=800,
             temperature=0.0,
             api_key=config.openai_api_key,
         )
@@ -264,14 +331,15 @@ async def decompose_raw_to_atomic_units(raw_composite: str, title: str) -> list[
                 units = parsed
         cleaned = [_normalize_whitespace(str(u)) for u in (units or []) if str(u).strip()]
         if not cleaned:
-            cleaned = _heuristic_atomic_units(raw_composite, title)
+            cleaned = _heuristic_logical_units(raw_composite, title)
             logger.info("ingest_decompose", path="llm_empty_fallback", units=len(cleaned))
         else:
+            cleaned = collapse_units_to_max_two(cleaned)
             logger.info("ingest_decompose", path="llm", units=len(cleaned))
         return cleaned
     except Exception as exc:
         logger.warning("ingest_decompose_failed", error=str(exc))
-        out = _heuristic_atomic_units(raw_composite, title)
+        out = _heuristic_logical_units(raw_composite, title)
         logger.info("ingest_decompose", path="exception_heuristic", units=len(out))
         return out
 
@@ -491,7 +559,7 @@ async def run_smart_ingestion_pipeline(
         )
     )
 
-    units = await decompose_raw_to_atomic_units(composite_for_decomp, legacy.get("title") or title)
+    units = await decompose_raw_to_logical_units(composite_for_decomp, legacy.get("title") or title)
     enriched = await enrich_atomic_chunks(units, legacy.get("title") or title)
 
     kept, dedup_warnings = await deduplicate_enriched_chunks_against_guild(

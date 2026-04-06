@@ -10,8 +10,9 @@ from backend.schemas.relay import PromptContext
 RetrievalMode = Literal["none", "moderate", "high"]
 
 CONVERSATIONAL_TONE = (
-    "Be natural, friendly, and conversational like a helpful support agent. "
-    "Use warm language. Avoid robotic or template-like replies."
+    "Be natural, friendly, and conversational like a skilled support agent who genuinely wants to help. "
+    "Use warm, clear language—relaxed but professional. Avoid stiff formulas, boilerplate, or filler. "
+    "Stay strictly grounded in the passages you are given; never invent facts."
 )
 
 
@@ -28,13 +29,14 @@ def _tier_from_similarity(top_similarity: float, has_chunks: bool) -> RetrievalM
 def _knowledge_suffix(user_language: str, mode: RetrievalMode) -> str:
     base_tone = (
         f"{CONVERSATIONAL_TONE} "
-        f"User message language — respond in this exact language: {user_language}. "
+        f"Respond entirely in the same language as the user's message (language hint: {user_language}). "
+        "For multilingual users, sound natural in that language—do not sound translated or stiff. "
         "Write like a real teammate: flowing sentences, not bullet lists unless the user asks. "
         "Ground every factual claim in the knowledge passages below. "
         "You may combine facts, apply obvious arithmetic from stated numbers, and draw careful "
         "inferences clearly supported by the text. "
         "Do not invent policies, prices, or features not stated or clearly implied. "
-        "Do not mention 'knowledge base', 'search', or 'database' to the user. "
+        "Never say 'knowledge base', 'search', 'database', or 'according to my sources' to the user. "
         "Do not use external or web knowledge."
     )
     if mode == "high":
@@ -46,10 +48,16 @@ def _knowledge_suffix(user_language: str, mode: RetrievalMode) -> str:
     if mode == "moderate":
         return (
             f"{base_tone} "
-            "RETRIEVAL: Match confidence is moderate — the topic may be phrased differently. "
-            "Start from main_content; you may begin with a natural soft line such as "
-            "'Based on the available information,' or the equivalent in the user's language "
-            "(never sound robotic). Then answer helpfully from the passages; note uncertainty briefly if needed."
+            "MATCH QUALITY: The link between the question and the passages is good but not perfect—"
+            "the user may have worded things differently or the topic may be adjacent. "
+            "First, briefly acknowledge what they are trying to do or find out (one short phrase or sentence, "
+            "in their language—e.g. that you understand they are asking about X). "
+            "Then answer from main_content first, weaving in additional_context or behavior_notes only when helpful. "
+            "You may ease into the answer with a natural line (in their language) such as a soft "
+            "'Here's what I can tell you' or 'From what we have documented'—avoid stiff English idioms if "
+            "the user is not writing in English. "
+            "If something is only partly covered, say so in a friendly way and give what you can; "
+            "offer to clarify or escalate only if the passages truly do not address their goal."
         )
     return base_tone
 

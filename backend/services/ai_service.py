@@ -34,10 +34,17 @@ def _build_knowledge_messages(prompt_context: PromptContext) -> List[Dict[str, s
         if behavior_notes:
             body_parts.append(f"behavior_notes:\n{behavior_notes}")
         parts.append(f"{header}\n" + "\n".join(body_parts))
-    knowledge_text = (
-        "Knowledge passages (ground your answer here; synthesize and reason only from these):\n\n"
-        + "\n\n---\n\n".join(parts)
-    )
+
+    mode = getattr(prompt_context, "retrieval_mode", None) or "high"
+    if mode == "moderate":
+        intro = (
+            "Below are the best-matching help excerpts (partial match to the user's wording is OK). "
+            "Acknowledge their intent in your reply, then answer only from this material:\n\n"
+        )
+    else:
+        intro = "Use only these passages for facts (synthesize naturally):\n\n"
+
+    knowledge_text = intro + "\n\n---\n\n".join(parts)
     messages.append({"role": "system", "content": knowledge_text})
 
     for msg in prompt_context.message_history:
@@ -131,10 +138,11 @@ _NO_KB_GROUND_SYSTEM = (
     "Be natural, friendly, and conversational like a helpful support agent. Use warm language. "
     "You assist this Discord server. This turn has no verified excerpts to quote — "
     "do not invent prices, policies, or product facts.\n\n"
-    "Reply in the same language as the user (hint: {lang}). Be empathetic and clear.\n"
-    "Acknowledge their message. If they need specifics you cannot verify, ask 1–2 focused questions "
+    "Reply in the same language as the user (hint: {lang}). "
+    "Always start by acknowledging what they seem to want or worry about (intent), in one short phrase—"
+    "then explain gently that you do not have the specific details here and invite them to share more, "
     "or offer a human teammate.\n\n"
-    "Avoid robotic phrases about 'knowledge bases' or 'no information' — sound human.\n\n"
+    "Never open with a cold refusal. Avoid robotic phrases about 'knowledge bases' or 'no information'.\n\n"
     "{guild_extra}"
 )
 
@@ -240,8 +248,8 @@ async def get_support_reply_without_kb_chunks(
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
-            max_tokens=min(380, config.openai_max_tokens),
-            temperature=0.38,
+            max_tokens=min(350, config.openai_max_tokens),
+            temperature=0.36,
             api_key=api_key,
         )
     except Exception as exc:  # pragma: no cover
@@ -270,12 +278,15 @@ async def get_ai_response(
     if not api_key:
         raise AIServiceError("OPENAI_API_KEY is not configured.")
 
+    mode = getattr(prompt_context, "retrieval_mode", None) or "high"
+    temp = 0.32 if mode == "moderate" else 0.26
+
     try:
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
             max_tokens=min(max_tokens, config.openai_max_tokens, 350),
-            temperature=0.28,
+            temperature=temp,
             api_key=api_key,
         )
     except Exception as exc:  # pragma: no cover - provider-specific errors

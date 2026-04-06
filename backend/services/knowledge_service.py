@@ -17,7 +17,6 @@ from backend.services.knowledge_structurer import (
     run_smart_ingestion_pipeline,
 )
 from backend.utils.embeddings import embed_text, cosine_similarity
-from backend.utils.text_splitter import MAX_CHUNK_CHARS_DEFAULT, recursive_char_split
 
 logger = structlog.get_logger(__name__)
 
@@ -268,16 +267,13 @@ async def create_knowledge_with_chunking(
         dict(c) for c in pipeline.structured_chunks if isinstance(c, dict)
     ]
 
+    # One dashboard row per logical chunk (pipeline caps at 2); no aggressive re-splitting.
     flat_parts: list[tuple[dict[str, Any], str]] = []
     for sc in serializable_chunks:
         text = (sc.get("text") or "").strip()
         if not text:
             continue
-        if len(text) <= MAX_CHUNK_CHARS_DEFAULT:
-            flat_parts.append((sc, text))
-        else:
-            for sp in recursive_char_split(text, max_len=MAX_CHUNK_CHARS_DEFAULT):
-                flat_parts.append((sc, sp.strip()))
+        flat_parts.append((sc, text))
 
     if not flat_parts:
         raise IngestionDuplicateError(
