@@ -1,17 +1,26 @@
-"""AI-assisted knowledge structuring service."""
+"""AI-assisted knowledge structuring service — decomposition, enrichment, deduplication."""
 
 from __future__ import annotations
 
 import json
 import re
+import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 from litellm import acompletion
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import config
+from backend.models.knowledge import Knowledge
+from backend.utils.embeddings import cosine_similarity, embed_text
 
 logger = structlog.get_logger(__name__)
+
+STRUCTURE_MODEL = "gpt-4o-mini"
+DEDUP_SIMILARITY_THRESHOLD = 0.92
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -180,3 +189,351 @@ async def structure_knowledge_entry(
     except Exception as exc:
         logger.warning("knowledge_structurer_fallback", error=str(exc))
         return baseline
+
+
+def _extract_json_array(text: str, key: str) -> list[Any] | None:
+    obj = _extract_json_object(text or "")
+    if not obj:
+        return None
+    v = obj.get(key)
+    return v if isinstance(v, list) else None
+
+
+def _heuristic_atomic_units(raw: str, title: str) -> list[str]:
+    """Fallback decomposition: paragraphs / sentences."""
+    cleaned = _normalize_whitespace(raw)
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", cleaned) if p.strip()]
+    if not parts:
+        return [_normalize_whitespace(title + "\n\n" + raw)[:4000]]
+    out: list[str] = []
+    for p in parts:
+        if len(p) > 1200:
+            out.extend(
+                x.strip()
+                for x in re.split(r"(?<=[.!?])\s+", p)
+                if x.strip() and len(x.strip()) > 20
+            ) or [p[:1200]]
+        else:
+            out.append(p)
+    return out[:24] or [_normalize_whitespace(raw)[:4000]]
+
+
+async def decompose_raw_to_atomic_units(raw_composite: str, title: str) -> list[str]:
+    """
+    Split raw user input into atomic semantic units (one concept per chunk).
+    Uses gpt-4o-mini; falls back to heuristic split without API.
+    """
+    raw_composite = _normalize_whitespace(raw_composite)
+    if not raw_composite:
+        return [_normalize_whitespace(title)]
+
+    if not config.openai_api_key:
+        units = _heuristic_atomic_units(raw_composite, title)
+        logger.info(
+            "ingest_decompose",
+            path="heuristic",
+            units=len(units),
+        )
+        return units
+
+    prompt = (
+        "Split the following knowledge text into atomic semantic units. "
+        "Each unit must express ONE clear concept or fact that can stand alone for retrieval. "
+        "Do not merge unrelated ideas. Preserve original language. "
+        'Return strict JSON only: {"units": ["...", ...]} with at least one string.'
+    )
+    try:
+        response = await acompletion(
+            model=STRUCTURE_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You output JSON only. No markdown.",
+                },
+                {"role": "user", "content": f"{prompt}\n\nTITLE:\n{title}\n\nTEXT:\n{raw_composite[:12000]}"},
+            ],
+            max_tokens=1200,
+            temperature=0.0,
+            api_key=config.openai_api_key,
+        )
+        text = response.choices[0].message.content if response and response.choices else ""
+        units = _extract_json_array(text or "", "units")
+        if not units:
+            parsed = _extract_json_object(text or "")
+            if isinstance(parsed, list):
+                units = parsed
+        cleaned = [_normalize_whitespace(str(u)) for u in (units or []) if str(u).strip()]
+        if not cleaned:
+            cleaned = _heuristic_atomic_units(raw_composite, title)
+            logger.info("ingest_decompose", path="llm_empty_fallback", units=len(cleaned))
+        else:
+            logger.info("ingest_decompose", path="llm", units=len(cleaned))
+        return cleaned
+    except Exception as exc:
+        logger.warning("ingest_decompose_failed", error=str(exc))
+        out = _heuristic_atomic_units(raw_composite, title)
+        logger.info("ingest_decompose", path="exception_heuristic", units=len(out))
+        return out
+
+
+async def enrich_atomic_chunks(units: list[str], title: str) -> list[dict[str, str]]:
+    """
+    For each atomic unit add topic, intent, context metadata (gpt-4o-mini).
+    """
+    if not units:
+        return []
+    if not config.openai_api_key:
+        return [
+            {
+                "text": u,
+                "topic": "",
+                "intent": "inform",
+                "context": "",
+            }
+            for u in units
+        ]
+
+    payload = {"title": title, "units": units}
+    prompt = (
+        "For each unit, add metadata for RAG. Return strict JSON only:\n"
+        '{"chunks":[{"text":"same as input unit text (verbatim)","topic":"short topical label",'
+        '"intent":"user intent this answers (e.g. pricing, hours, policy)","context":"when to use this snippet"}], ...}\n'
+        "Keep the same number and order of chunks as input units."
+    )
+    try:
+        response = await acompletion(
+            model=STRUCTURE_MODEL,
+            messages=[
+                {"role": "system", "content": "You output JSON only."},
+                {"role": "user", "content": f"{prompt}\n\nINPUT:\n{json.dumps(payload, ensure_ascii=False)[:14000]}"},
+            ],
+            max_tokens=2000,
+            temperature=0.0,
+            api_key=config.openai_api_key,
+        )
+        text = response.choices[0].message.content if response and response.choices else ""
+        parsed = _extract_json_object(text or "")
+        chunks = (parsed or {}).get("chunks") if isinstance(parsed, dict) else None
+        if not isinstance(chunks, list) or len(chunks) != len(units):
+            logger.warning(
+                "ingest_enrich_mismatch",
+                expected=len(units),
+                got=len(chunks) if isinstance(chunks, list) else 0,
+            )
+            return [
+                {
+                    "text": u,
+                    "topic": "",
+                    "intent": "inform",
+                    "context": "",
+                }
+                for u in units
+            ]
+        out: list[dict[str, str]] = []
+        for i, u in enumerate(units):
+            c = chunks[i] if i < len(chunks) else {}
+            if not isinstance(c, dict):
+                c = {}
+            out.append(
+                {
+                    "text": _normalize_whitespace(str(c.get("text") or u)),
+                    "topic": _normalize_whitespace(str(c.get("topic") or ""))[:200],
+                    "intent": _normalize_whitespace(str(c.get("intent") or "inform"))[:200],
+                    "context": _normalize_whitespace(str(c.get("context") or ""))[:500],
+                }
+            )
+        logger.info("ingest_enrich", path="llm", chunks=len(out))
+        return out
+    except Exception as exc:
+        logger.warning("ingest_enrich_failed", error=str(exc))
+        return [
+            {"text": u, "topic": "", "intent": "inform", "context": ""}
+            for u in units
+        ]
+
+
+def embedding_text_for_chunk(chunk: dict[str, str]) -> str:
+    parts = [
+        chunk.get("topic") or "",
+        chunk.get("text") or "",
+        chunk.get("intent") or "",
+        chunk.get("context") or "",
+    ]
+    return _normalize_whitespace("\n".join(p for p in parts if p))
+
+
+async def deduplicate_enriched_chunks_against_guild(
+    session: AsyncSession,
+    guild_id: int,
+    enriched_chunks: list[dict[str, str]],
+    *,
+    exclude_knowledge_ids: set[uuid.UUID] | None = None,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """
+    Cosine similarity vs existing row embeddings in the same guild.
+    Returns (chunks_to_keep, warning_messages). Drops chunks above threshold (flagged duplicates).
+    """
+    exclude = exclude_knowledge_ids or set()
+    result = await session.execute(
+        select(Knowledge).where(Knowledge.guild_id == guild_id)
+    )
+    existing = list(result.scalars().all())
+    warnings: list[str] = []
+    kept: list[dict[str, str]] = []
+    batch_vecs: list[list[float]] = []
+
+    for idx, chunk in enumerate(enriched_chunks):
+        text = embedding_text_for_chunk(chunk)
+        if not text:
+            kept.append(chunk)
+            continue
+        new_vec = embed_text(text)
+        intra_dup = False
+        for bv in batch_vecs:
+            if cosine_similarity(new_vec, bv) > DEDUP_SIMILARITY_THRESHOLD:
+                msg = f"chunk[{idx}] near-duplicate within same ingestion batch"
+                logger.warning("ingest_dedup_intra_batch", guild_id=guild_id, detail=msg)
+                warnings.append(msg)
+                intra_dup = True
+                break
+        if intra_dup:
+            continue
+
+        dup_of: str | None = None
+        hit_sim = 0.0
+        for row in existing:
+            if row.id in exclude:
+                continue
+            if not row.embedding:
+                continue
+            sim = cosine_similarity(new_vec, row.embedding)
+            if sim > DEDUP_SIMILARITY_THRESHOLD:
+                dup_of = str(row.id)
+                hit_sim = sim
+                break
+        if dup_of:
+            msg = (
+                f"chunk[{idx}] duplicate of existing knowledge id={dup_of} "
+                f"(similarity {hit_sim:.3f} > {DEDUP_SIMILARITY_THRESHOLD})"
+            )
+            logger.warning("ingest_dedup_flag", guild_id=guild_id, detail=msg)
+            warnings.append(msg)
+            continue
+        batch_vecs.append(new_vec)
+        kept.append(chunk)
+
+    logger.info(
+        "ingest_dedup",
+        guild_id=guild_id,
+        input_chunks=len(enriched_chunks),
+        kept=len(kept),
+        dropped=len(enriched_chunks) - len(kept),
+    )
+    return kept, warnings
+
+
+@dataclass
+class IngestionPipelineResult:
+    raw_content: str
+    structured_chunks: list[dict[str, Any]]
+    structured_for_legacy: dict[str, str | None]
+    warnings: list[str] = field(default_factory=list)
+
+
+async def run_smart_ingestion_pipeline(
+    session: AsyncSession,
+    guild_id: int,
+    title: str,
+    content: str = "",
+    main_content: str | None = None,
+    additional_context: str | None = None,
+    behavior_notes: str | None = None,
+    *,
+    exclude_knowledge_ids: set[uuid.UUID] | None = None,
+) -> IngestionPipelineResult:
+    """
+    Full pipeline: legacy structure pass → decompose → enrich → dedup.
+    Returns data for persistence + legacy fields compatible with existing columns.
+    """
+    raw_content = _normalize_whitespace(
+        "\n\n".join(
+            p
+            for p in (
+                title,
+                content or "",
+                main_content or "",
+                additional_context or "",
+                behavior_notes or "",
+            )
+            if p
+        )
+    )
+    logger.info("ingest_pipeline_start", guild_id=guild_id, raw_len=len(raw_content))
+
+    legacy = await structure_knowledge_entry(
+        title=title,
+        content=content,
+        main_content=main_content,
+        additional_context=additional_context,
+        behavior_notes=behavior_notes,
+    )
+
+    composite_for_decomp = raw_content or _normalize_whitespace(
+        "\n\n".join(
+            x
+            for x in (
+                legacy.get("title") or "",
+                legacy.get("main_content") or "",
+                legacy.get("additional_context") or "",
+                legacy.get("behavior_notes") or "",
+            )
+            if x
+        )
+    )
+
+    units = await decompose_raw_to_atomic_units(composite_for_decomp, legacy.get("title") or title)
+    enriched = await enrich_atomic_chunks(units, legacy.get("title") or title)
+
+    kept, dedup_warnings = await deduplicate_enriched_chunks_against_guild(
+        session,
+        guild_id,
+        enriched,
+        exclude_knowledge_ids=exclude_knowledge_ids,
+    )
+
+    structured_chunks: list[dict[str, Any]] = []
+    for i, ch in enumerate(kept):
+        structured_chunks.append(
+            {
+                "text": ch.get("text", ""),
+                "topic": ch.get("topic", ""),
+                "intent": ch.get("intent", ""),
+                "context": ch.get("context", ""),
+                "index": i,
+            }
+        )
+
+    main_joined = "\n\n".join(c.get("text", "") for c in kept if c.get("text"))
+    if not main_joined.strip():
+        main_joined = legacy.get("main_content") or ""
+
+    structured_for_legacy = {
+        "title": legacy.get("title"),
+        "main_content": main_joined,
+        "additional_context": legacy.get("additional_context"),
+        "behavior_notes": legacy.get("behavior_notes"),
+    }
+
+    logger.info(
+        "ingest_pipeline_done",
+        guild_id=guild_id,
+        atomic=len(structured_chunks),
+        warnings=len(dedup_warnings),
+    )
+
+    return IngestionPipelineResult(
+        raw_content=raw_content,
+        structured_chunks=structured_chunks,
+        structured_for_legacy=structured_for_legacy,
+        warnings=dedup_warnings,
+    )

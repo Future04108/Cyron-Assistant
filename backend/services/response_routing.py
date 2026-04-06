@@ -1,5 +1,5 @@
 """Greeting/small-talk detection, language hints, and template replies (no web, minimal tokens).
-Vector match tiers (high / moderate / low / fallback) live in backend.config and prompt_builder.
+KB similarity tiers: backend.config + backend.services.prompt_builder.
 """
 
 from __future__ import annotations
@@ -65,6 +65,10 @@ _LANG_HINTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(hallo|dank|graag|goedemorgen)\b", re.I), "nl"),
     (re.compile(r"\b(cześć|dziękuję|dzień\s+dobry)\b", re.I), "pl"),
     (re.compile(r"\b(привет|спасибо|здравствуйте)\b", re.I), "ru"),
+    (re.compile(r"\b(hej|tack|välkommen|god\s+dag)\b", re.I), "sv"),
+    (re.compile(r"\b(xin\s+chào|cảm\s+ơn|bạn)\b", re.I), "vi"),
+    (re.compile(r"\b(merhaba|teşekkür|yardım)\b", re.I), "tr"),
+    (re.compile(r"(नमस्ते|धन्यवाद)"), "hi"),
 ]
 
 

@@ -12,6 +12,7 @@ from backend.services.guild_service import get_guild
 from backend.services.knowledge_service import (
     GuildTotalLimitError,
     EntryTooLargeError,
+    IngestionDuplicateError,
     create_knowledge_with_chunking,
     get_knowledge_by_id,
     list_knowledge,
@@ -20,6 +21,22 @@ from backend.services.knowledge_service import (
 )
 
 router = APIRouter(prefix="/guilds/{guild_id}/knowledge", tags=["knowledge"])
+
+
+def _knowledge_response_row(k) -> KnowledgeResponse:
+    return KnowledgeResponse(
+        id=k.id,
+        guild_id=k.guild_id,
+        title=k.title,
+        content=k.content,
+        main_content=k.main_content,
+        additional_context=k.additional_context,
+        behavior_notes=k.behavior_notes,
+        raw_content=k.raw_content,
+        structured_chunks=k.structured_chunks,
+        chunk_index=k.chunk_index,
+        created_at=k.created_at.isoformat() if k.created_at else "",
+    )
 
 
 @router.get("", response_model=list[KnowledgeResponse])
@@ -33,19 +50,7 @@ async def list_guild_knowledge(
         raise HTTPException(status_code=404, detail="Guild not found")
 
     items = await list_knowledge(session, guild_id)
-    return [
-        KnowledgeResponse(
-            id=k.id,
-            guild_id=k.guild_id,
-            title=k.title,
-            content=k.content,
-            main_content=k.main_content,
-            additional_context=k.additional_context,
-            behavior_notes=k.behavior_notes,
-            created_at=k.created_at.isoformat() if k.created_at else "",
-        )
-        for k in items
-    ]
+    return [_knowledge_response_row(k) for k in items]
 
 
 @router.post("", response_model=KnowledgeResponse)
@@ -74,19 +79,11 @@ async def create_guild_knowledge(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except GuildTotalLimitError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
+    except IngestionDuplicateError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
-    # Return first created chunk as representative
     knowledge = created[0]
-    return KnowledgeResponse(
-        id=knowledge.id,
-        guild_id=knowledge.guild_id,
-        title=knowledge.title,
-        content=knowledge.content,
-        main_content=knowledge.main_content,
-        additional_context=knowledge.additional_context,
-        behavior_notes=knowledge.behavior_notes,
-        created_at=knowledge.created_at.isoformat() if knowledge.created_at else "",
-    )
+    return _knowledge_response_row(knowledge)
 
 
 @router.get("/{knowledge_id}", response_model=KnowledgeResponse)
@@ -103,16 +100,7 @@ async def get_guild_knowledge(
     knowledge = await get_knowledge_by_id(session, knowledge_id, guild_id)
     if not knowledge:
         raise HTTPException(status_code=404, detail="Knowledge not found")
-    return KnowledgeResponse(
-        id=knowledge.id,
-        guild_id=knowledge.guild_id,
-        title=knowledge.title,
-        content=knowledge.content,
-        main_content=knowledge.main_content,
-        additional_context=knowledge.additional_context,
-        behavior_notes=knowledge.behavior_notes,
-        created_at=knowledge.created_at.isoformat() if knowledge.created_at else "",
-    )
+    return _knowledge_response_row(knowledge)
 
 
 @router.put("/{knowledge_id}", response_model=KnowledgeResponse)
@@ -142,19 +130,12 @@ async def update_guild_knowledge(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except GuildTotalLimitError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
+    except IngestionDuplicateError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     if not knowledge:
         raise HTTPException(status_code=404, detail="Knowledge not found")
-    return KnowledgeResponse(
-        id=knowledge.id,
-        guild_id=knowledge.guild_id,
-        title=knowledge.title,
-        content=knowledge.content,
-        main_content=knowledge.main_content,
-        additional_context=knowledge.additional_context,
-        behavior_notes=knowledge.behavior_notes,
-        created_at=knowledge.created_at.isoformat() if knowledge.created_at else "",
-    )
+    return _knowledge_response_row(knowledge)
 
 
 @router.delete("/{knowledge_id}", status_code=204)

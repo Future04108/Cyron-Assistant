@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 import re
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import structlog
 from sqlalchemy import func, select
@@ -12,9 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import MIN_SIMILARITY_THRESHOLD
 from backend.models.knowledge import Knowledge
-from backend.services.knowledge_structurer import structure_knowledge_entry
+from backend.services.knowledge_structurer import (
+    embedding_text_for_chunk,
+    run_smart_ingestion_pipeline,
+)
 from backend.utils.embeddings import embed_text, cosine_similarity
-from backend.utils.text_splitter import chunk_knowledge
+from backend.utils.text_splitter import MAX_CHUNK_CHARS_DEFAULT, recursive_char_split
 
 logger = structlog.get_logger(__name__)
 
@@ -53,6 +56,23 @@ class EntryTooLargeError(KnowledgeLimitError):
 
 class GuildTotalLimitError(KnowledgeLimitError):
     """Raised when guild total knowledge characters exceed plan limit."""
+
+
+class IngestionDuplicateError(KnowledgeLimitError):
+    """Raised when all ingested chunks match existing knowledge (near-duplicate)."""
+
+
+def _format_chunk_row_content(meta: dict[str, Any], body: str) -> str:
+    lines: list[str] = []
+    if meta.get("topic"):
+        lines.append(f"Topic: {meta['topic']}")
+    if meta.get("intent"):
+        lines.append(f"Intent: {meta['intent']}")
+    if meta.get("context"):
+        lines.append(f"Context: {meta['context']}")
+    if lines:
+        return "\n".join(lines) + "\n\n" + body
+    return body
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -200,9 +220,9 @@ async def create_knowledge_with_chunking(
     plan: str = "free",
 ) -> List[Knowledge]:
     """
-    Create knowledge entry with validation and chunking.
+    Create knowledge via smart ingestion (decompose → enrich → dedup) and persist rows.
 
-    Returns list of created Knowledge rows (one per chunk).
+    Returns list of created Knowledge rows (one per stored segment).
     Raises KnowledgeLimitError subclasses if limits are violated.
     """
     raw_text = "\n\n".join(
@@ -219,29 +239,54 @@ async def create_knowledge_with_chunking(
 
     current_total = await get_knowledge_total_chars(session, guild_id)
 
-    structured = await structure_knowledge_entry(
-        title=title,
+    logger.info("knowledge_ingest_invoke", guild_id=guild_id, entry_len=entry_len)
+
+    pipeline = await run_smart_ingestion_pipeline(
+        session,
+        guild_id,
+        title,
         content=content,
         main_content=main_content,
         additional_context=additional_context,
         behavior_notes=behavior_notes,
-    )
-    cleaned_title = structured["title"] or "Knowledge Entry"
-    main_content = structured["main_content"] or ""
-    additional_context = structured["additional_context"]
-    behavior_notes = structured["behavior_notes"]
-    normalized_content = "\n\n".join(
-        part
-        for part in (
-            main_content,
-            f"Additional Context:\n{additional_context}" if additional_context else "",
-            f"Behavior Notes:\n{behavior_notes}" if behavior_notes else "",
-        )
-        if part
+        exclude_knowledge_ids=None,
     )
 
-    chunks = chunk_knowledge(cleaned_title, normalized_content)
-    new_chars = sum(len(t) + len(c) for t, c in chunks)
+    if not pipeline.structured_chunks:
+        raise IngestionDuplicateError(
+            "All segments matched existing knowledge too closely (duplicate). "
+            "Edit the text or remove overlapping entries."
+        )
+
+    legacy = pipeline.structured_for_legacy
+    cleaned_title = (legacy.get("title") or "Knowledge Entry").strip()
+    main_body = (legacy.get("main_content") or "").strip()
+    additional_context = legacy.get("additional_context")
+    behavior_notes = legacy.get("behavior_notes")
+
+    serializable_chunks: list[dict[str, Any]] = [
+        dict(c) for c in pipeline.structured_chunks if isinstance(c, dict)
+    ]
+
+    flat_parts: list[tuple[dict[str, Any], str]] = []
+    for sc in serializable_chunks:
+        text = (sc.get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) <= MAX_CHUNK_CHARS_DEFAULT:
+            flat_parts.append((sc, text))
+        else:
+            for sp in recursive_char_split(text, max_len=MAX_CHUNK_CHARS_DEFAULT):
+                flat_parts.append((sc, sp.strip()))
+
+    if not flat_parts:
+        raise IngestionDuplicateError(
+            "No storable segments after ingestion. Try different wording."
+        )
+
+    new_chars = sum(
+        len(cleaned_title) + len(sp) + 32 for _, sp in flat_parts
+    )
 
     if current_total + new_chars > total_limit:
         limits_str = {
@@ -255,18 +300,22 @@ async def create_knowledge_with_chunking(
         )
 
     created: list[Knowledge] = []
-    for chunk_title, chunk_content in chunks:
-        embedding_source = (
-            f"{chunk_title}\n{main_content}\n{additional_context or ''}\n{behavior_notes or ''}"
-        )
-        embedding = embed_text(embedding_source)
+    for idx, (meta, sp) in enumerate(flat_parts):
+        row_title = cleaned_title if idx == 0 else f"{cleaned_title} – Part {idx + 1}"
+        row_content = _format_chunk_row_content(meta, sp)
+        clean_meta = {k: str(v) for k, v in meta.items() if k not in ("index", "text")}
+        emb_in = embedding_text_for_chunk({**clean_meta, "text": sp})
+        embedding = embed_text(emb_in)
         knowledge = Knowledge(
             guild_id=guild_id,
-            title=chunk_title,
-            content=chunk_content,
-            main_content=main_content,
+            title=row_title,
+            content=row_content,
+            main_content=sp,
             additional_context=additional_context,
             behavior_notes=behavior_notes,
+            raw_content=pipeline.raw_content,
+            structured_chunks=serializable_chunks,
+            chunk_index=idx,
             embedding=embedding,
         )
         session.add(knowledge)
@@ -278,12 +327,13 @@ async def create_knowledge_with_chunking(
         "knowledge_created_with_chunking",
         guild_id=guild_id,
         plan=plan_key,
-        chunks=len(created),
+        rows=len(created),
         entry_len=entry_len,
         new_chars=new_chars,
         total_after=current_total + new_chars,
         has_additional_context=bool(additional_context),
         has_behavior_notes=bool(behavior_notes),
+        ingest_warnings=len(pipeline.warnings),
     )
 
     return created
@@ -322,28 +372,43 @@ async def update_knowledge(
     additional_context: str | None = None,
     behavior_notes: str | None = None,
 ) -> Knowledge | None:
-    """Update single knowledge entry with validation."""
+    """Update single knowledge entry with smart ingestion (single stored row)."""
     k = await get_knowledge_by_id(session, knowledge_id, guild_id)
     if not k:
         return None
 
     incoming_title = title if title is not None else (k.title or "Knowledge Entry")
     incoming_content = content if content is not None else (k.content or "")
-    structured = await structure_knowledge_entry(
-        title=incoming_title,
+
+    logger.info("knowledge_ingest_update", guild_id=guild_id, knowledge_id=str(knowledge_id))
+
+    pipeline = await run_smart_ingestion_pipeline(
+        session,
+        guild_id,
+        incoming_title,
         content=incoming_content,
         main_content=main_content if main_content is not None else k.main_content,
         additional_context=additional_context if additional_context is not None else k.additional_context,
         behavior_notes=behavior_notes if behavior_notes is not None else k.behavior_notes,
+        exclude_knowledge_ids={knowledge_id},
     )
-    new_title = structured["title"] or "Knowledge Entry"
-    main_content = structured["main_content"] or ""
-    additional_context = structured["additional_context"]
-    behavior_notes = structured["behavior_notes"]
+
+    if not pipeline.structured_chunks:
+        raise IngestionDuplicateError(
+            "All segments matched existing knowledge too closely (duplicate). "
+            "Edit the text or remove overlapping entries."
+        )
+
+    legacy = pipeline.structured_for_legacy
+    new_title = (legacy.get("title") or "Knowledge Entry").strip()
+    main_body = (legacy.get("main_content") or "").strip()
+    additional_context = legacy.get("additional_context")
+    behavior_notes = legacy.get("behavior_notes")
+
     new_content = "\n\n".join(
         part
         for part in (
-            main_content,
+            main_body,
             f"Additional Context:\n{additional_context}" if additional_context else "",
             f"Behavior Notes:\n{behavior_notes}" if behavior_notes else "",
         )
@@ -356,14 +421,10 @@ async def update_knowledge(
             "Knowledge entry exceeds 6000 characters. Please shorten or split."
         )
 
-    # Recalculate total chars with this entry changed
     current_total = await get_knowledge_total_chars(session, guild_id)
     old_len = len(k.title) + len(k.content)
     delta = entry_len - old_len
 
-    # Best-effort plan detection: assume free if unknown (no guild context here)
-    # The API layer can enforce stricter per-plan logic if desired.
-    # For safety, use the lowest limit.
     total_limit = KNOWLEDGE_CHAR_LIMITS["free"]
     if current_total + delta > total_limit:
         raise GuildTotalLimitError(
@@ -371,14 +432,25 @@ async def update_knowledge(
             "Upgrade or remove entries."
         )
 
+    emb_parts: list[str] = []
+    for c in pipeline.structured_chunks:
+        if not isinstance(c, dict):
+            continue
+        ct = str(c.get("text") or "")
+        meta = {x: str(y) for x, y in c.items() if x not in ("index",)}
+        meta["text"] = ct
+        emb_parts.append(embedding_text_for_chunk(meta))
+    combined_emb = "\n\n".join(emb_parts) if emb_parts else new_title + "\n" + main_body
+
     k.title = new_title
     k.content = new_content
-    k.main_content = main_content
+    k.main_content = main_body
     k.additional_context = additional_context
     k.behavior_notes = behavior_notes
-    k.embedding = embed_text(
-        f"{k.title}\n{k.main_content}\n{k.additional_context or ''}\n{k.behavior_notes or ''}"
-    )
+    k.raw_content = pipeline.raw_content
+    k.structured_chunks = [dict(x) for x in pipeline.structured_chunks if isinstance(x, dict)]
+    k.chunk_index = 0
+    k.embedding = embed_text(combined_emb)
     await session.flush()
     return k
 

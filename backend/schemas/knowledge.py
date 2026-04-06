@@ -1,5 +1,7 @@
 """Knowledge base schemas."""
 
+from typing import Any
+
 from uuid import UUID
 from pydantic import BaseModel, Field
 
@@ -34,6 +36,9 @@ class KnowledgeResponse(BaseModel):
     main_content: str | None = None
     additional_context: str | None = None
     behavior_notes: str | None = None
+    raw_content: str | None = None
+    structured_chunks: list[dict[str, Any]] | None = None
+    chunk_index: int | None = None
     created_at: str
 
     class Config:

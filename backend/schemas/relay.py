@@ -26,7 +26,7 @@ class PromptContext(BaseModel):
     )
     retrieval_mode: str = Field(
         default="none",
-        description="none | low | moderate | high — KB match tier for this turn",
+        description="none | moderate | high — KB match tier for this turn",
     )
 
 

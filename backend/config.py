@@ -5,16 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Minimum cosine similarity for knowledge retrieval (low_confidence if below this).
-MIN_SIMILARITY_THRESHOLD: float = 0.57
-# High-confidence tier for strict KB answers (same as MIN_SIMILARITY_THRESHOLD).
-SIMILARITY_HIGH: float = 0.57
-# Moderate-confidence tier (still inject KB; softer grounding instructions).
-SIMILARITY_MODERATE_FLOOR: float = 0.40
-# Weakest tier that still receives KB snippets (maximize helpful answers from partial match).
-SIMILARITY_LOW_FLOOR: float = 0.32
-# Minimum cosine score to retrieve candidates (below this → natural reply without KB excerpts).
-MIN_SIMILARITY_RETRIEVAL: float = 0.32
+# Below this vs top retrieved score → low_confidence flag for UI/analytics.
+MIN_SIMILARITY_THRESHOLD: float = 0.55
+# Strict KB-anchored answers (high similarity).
+SIMILARITY_HIGH: float = 0.55
+# Minimum similarity to inject KB at all (best-effort / moderate band is [floor, high)).
+SIMILARITY_MODERATE_FLOOR: float = 0.30
+# Minimum score to return candidates from vector search (below → no KB injection).
+MIN_SIMILARITY_RETRIEVAL: float = 0.30
 
 
 class BackendConfig:

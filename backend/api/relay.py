@@ -29,6 +29,7 @@ from backend.services.message_service import add_message, get_last_messages
 from backend.services.prompt_builder import build_prompt_context
 from backend.services.usage_service import log_usage
 from backend.services.retrieval_query import english_for_embedding_search
+from backend.services.intent_classifier import classify_relay_intent
 from backend.services.response_routing import (
     detect_language_hint,
     greeting_reply_for_language,
@@ -124,84 +125,108 @@ async def relay_message(
             top_similarity = 0.0
             built: dict | None = None
 
-            # 6a. Greeting / small talk — templates only (no RAG)
-            if is_greeting_or_smalltalk(payload.content):
-                reply = greeting_reply_for_language(lang)
-                prompt_context = PromptContext(
-                    system_prompt="",
-                    knowledge_chunks=[],
-                    message_history=[],
-                    user_language=lang,
-                    retrieval_mode="none",
-                )
-                logger.info(
-                    "relay_path",
-                    path="greeting",
-                    lang=lang,
-                    guild_id=guild_id,
-                )
-            # 6b. Very short acks — lightweight LLM (no KB)
-            elif is_very_short_ack_lightweight(payload.content):
-                try:
-                    reply, prompt_tokens, completion_tokens = await get_lightweight_short_reply(
-                        payload.content
-                    )
-                except AIServiceError:
+            intent = await classify_relay_intent(payload.content)
+
+            if intent == "generic":
+                if is_greeting_or_smalltalk(payload.content):
                     reply = greeting_reply_for_language(lang)
-                    prompt_tokens = 0
-                    completion_tokens = 0
-                prompt_context = PromptContext(
-                    system_prompt="",
-                    knowledge_chunks=[],
-                    message_history=[],
-                    user_language=lang,
-                    retrieval_mode="none",
-                )
-                logger.info(
-                    "relay_path",
-                    path="lightweight_short",
-                    lang=lang,
-                    guild_id=guild_id,
-                )
-            elif is_conversational_without_kb(payload.content):
-                last_msgs = await get_last_messages(session, ticket.id, limit=6)
-                message_history = [
-                    {"role": m.role, "content": m.content} for m in last_msgs
-                ]
-                try:
-                    reply, prompt_tokens, completion_tokens = (
-                        await get_natural_conversational_reply(
-                            guild.system_prompt or "",
-                            message_history,
-                            payload.content,
-                            lang,
+                    prompt_context = PromptContext(
+                        system_prompt="",
+                        knowledge_chunks=[],
+                        message_history=[],
+                        user_language=lang,
+                        retrieval_mode="none",
+                    )
+                    logger.info(
+                        "relay_path",
+                        path="greeting",
+                        lang=lang,
+                        guild_id=guild_id,
+                    )
+                elif is_very_short_ack_lightweight(payload.content):
+                    try:
+                        reply, prompt_tokens, completion_tokens = await get_lightweight_short_reply(
+                            payload.content
                         )
+                    except AIServiceError:
+                        reply = greeting_reply_for_language(lang)
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                    prompt_context = PromptContext(
+                        system_prompt="",
+                        knowledge_chunks=[],
+                        message_history=[],
+                        user_language=lang,
+                        retrieval_mode="none",
                     )
-                except AIServiceError:
-                    reply = greeting_reply_for_language(lang)
-                    prompt_tokens = 0
-                    completion_tokens = 0
-                prompt_context = PromptContext(
-                    system_prompt="",
-                    knowledge_chunks=[],
-                    message_history=message_history,
-                    user_language=lang,
-                    retrieval_mode="none",
-                )
-                logger.info(
-                    "relay_path",
-                    path="natural_conversational",
-                    lang=lang,
-                    guild_id=guild_id,
-                )
+                    logger.info(
+                        "relay_path",
+                        path="lightweight_short",
+                        lang=lang,
+                        guild_id=guild_id,
+                    )
+                elif is_conversational_without_kb(payload.content):
+                    last_msgs = await get_last_messages(session, ticket.id, limit=6)
+                    message_history = [
+                        {"role": m.role, "content": m.content} for m in last_msgs
+                    ]
+                    try:
+                        reply, prompt_tokens, completion_tokens = (
+                            await get_natural_conversational_reply(
+                                guild.system_prompt or "",
+                                message_history,
+                                payload.content,
+                                lang,
+                            )
+                        )
+                    except AIServiceError:
+                        reply = greeting_reply_for_language(lang)
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                    prompt_context = PromptContext(
+                        system_prompt="",
+                        knowledge_chunks=[],
+                        message_history=message_history,
+                        user_language=lang,
+                        retrieval_mode="none",
+                    )
+                    logger.info(
+                        "relay_path",
+                        path="natural_conversational",
+                        lang=lang,
+                        guild_id=guild_id,
+                    )
+                else:
+                    try:
+                        reply, prompt_tokens, completion_tokens = await get_lightweight_short_reply(
+                            payload.content
+                        )
+                    except AIServiceError:
+                        reply = greeting_reply_for_language(lang)
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                    prompt_context = PromptContext(
+                        system_prompt="",
+                        knowledge_chunks=[],
+                        message_history=[],
+                        user_language=lang,
+                        retrieval_mode="none",
+                    )
+                    logger.info(
+                        "relay_path",
+                        path="intent_generic_fallback",
+                        lang=lang,
+                        guild_id=guild_id,
+                    )
             else:
                 # English expansion improves retrieval when KB is English but user is not
                 emb_query = await english_for_embedding_search(payload.content)
-                if emb_query.strip() != payload.content.strip():
-                    logger.info(
-                        "relay_retrieval_embedding_expanded",
-                        guild_id=guild_id,
-                    )
+                logger.info(
+                    "relay_hybrid_retrieval",
+                    guild_id=guild_id,
+                    lang=lang,
+                    embedding_expanded=emb_query.strip() != (payload.content or "").strip(),
+                )
 
                 knowledge_items, top_similarity = await search_knowledge(
                     session,
@@ -254,7 +279,7 @@ async def relay_message(
                 else:
                     try:
                         reply, prompt_tokens, completion_tokens = await get_ai_response(
-                            prompt_context, max_tokens=400
+                            prompt_context, max_tokens=350
                         )
                         logger.info(
                             "relay_path",

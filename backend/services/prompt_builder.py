@@ -4,65 +4,54 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, TypedDict
 
-from backend.config import (
-    MIN_SIMILARITY_THRESHOLD,
-    SIMILARITY_HIGH,
-    SIMILARITY_LOW_FLOOR,
-    SIMILARITY_MODERATE_FLOOR,
-)
+from backend.config import MIN_SIMILARITY_THRESHOLD, SIMILARITY_HIGH, SIMILARITY_MODERATE_FLOOR
 from backend.schemas.relay import PromptContext
 
-RetrievalMode = Literal["none", "low", "moderate", "high"]
+RetrievalMode = Literal["none", "moderate", "high"]
+
+CONVERSATIONAL_TONE = (
+    "Be natural, friendly, and conversational like a helpful support agent. "
+    "Use warm language. Avoid robotic or template-like replies."
+)
 
 
 def _tier_from_similarity(top_similarity: float, has_chunks: bool) -> RetrievalMode:
     if not has_chunks:
         return "none"
+    if top_similarity < SIMILARITY_MODERATE_FLOOR:
+        return "none"
     if top_similarity >= SIMILARITY_HIGH:
         return "high"
-    if top_similarity >= SIMILARITY_MODERATE_FLOOR:
-        return "moderate"
-    if top_similarity >= SIMILARITY_LOW_FLOOR:
-        return "low"
-    return "none"
+    return "moderate"
 
 
 def _knowledge_suffix(user_language: str, mode: RetrievalMode) -> str:
-    human_core = (
-        f"User message language (respond in this language): {user_language}. "
-        "Write like a thoughtful human support agent: warm, clear, and direct — not stiff or robotic. "
+    base_tone = (
+        f"{CONVERSATIONAL_TONE} "
+        f"User message language — respond in this exact language: {user_language}. "
+        "Write like a real teammate: flowing sentences, not bullet lists unless the user asks. "
         "Ground every factual claim in the knowledge passages below. "
-        "You may combine facts from the passages, apply obvious arithmetic (e.g. totals from unit prices), "
-        "and draw careful, reasonable inferences when they clearly follow from the text — "
-        "the way a good agent would, not only when a single sentence literally restates the answer. "
-        "Do not invent policies, prices, dates, or features that are not stated or clearly implied. "
-        "If the passages only partially cover the question, answer the parts you can and say what "
-        "you would need clarified; avoid refusing with 'no information' when the passages still help. "
-        "Do not cite 'knowledge base search' or similar meta-phrases to the user. "
+        "You may combine facts, apply obvious arithmetic from stated numbers, and draw careful "
+        "inferences clearly supported by the text. "
+        "Do not invent policies, prices, or features not stated or clearly implied. "
+        "Do not mention 'knowledge base', 'search', or 'database' to the user. "
         "Do not use external or web knowledge."
     )
     if mode == "high":
         return (
-            f"{human_core} "
-            "Prioritize main_content first; then additional_context and behavior_notes when they "
-            "clearly apply. For numbers and tiers: prefer exact quoted values from the text; "
-            "if something is not stated, say so and offer what is listed."
+            f"{base_tone} "
+            "Prioritize main_content first; then additional_context and behavior_notes when relevant. "
+            "For prices and tiers, quote values from the text; if missing, say so briefly."
         )
     if mode == "moderate":
         return (
-            f"{human_core} "
-            "RETRIEVAL NOTE: Semantic match is moderate — phrasing or topic may differ slightly. "
-            "Use main_content first; synthesize carefully; if a passage is only adjacent, say so briefly "
-            "and still help with what applies."
+            f"{base_tone} "
+            "RETRIEVAL: Match confidence is moderate — the topic may be phrased differently. "
+            "Start from main_content; you may begin with a natural soft line such as "
+            "'Based on the available information,' or the equivalent in the user's language "
+            "(never sound robotic). Then answer helpfully from the passages; note uncertainty briefly if needed."
         )
-    if mode == "low":
-        return (
-            f"{human_core} "
-            "RETRIEVAL NOTE: Weaker match — passages may be loosely related. If they clearly address "
-            "the question, answer from main_content first. If the link is weak, reply helpfully, "
-            "use what fits, and ask one short clarifying question rather than refusing outright."
-        )
-    return human_core
+    return base_tone
 
 
 def _knowledge_system_prompt(
@@ -90,10 +79,10 @@ def build_prompt_context(
     top_similarity: float,
     user_language: str = "en",
     min_confidence: float = MIN_SIMILARITY_THRESHOLD,
-    max_chars: int = 3_200,
+    max_chars: int = 3_000,
 ) -> BuiltPromptContext:
     """
-    Tiered RAG: high, moderate, low (SIMILARITY_LOW_FLOOR ..), none below low floor or empty retrieval.
+    Tiers: high (>= SIMILARITY_HIGH), moderate ([SIMILARITY_MODERATE_FLOOR, high)), none below floor or empty.
     """
     history = message_history[-6:]
 

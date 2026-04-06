@@ -97,8 +97,8 @@ def _extract_usage(response: Any) -> Tuple[int, int]:
 
 
 _LIGHTWEIGHT_SHORT_SYSTEM = (
-    "You are a support teammate. Reply in ONE short natural sentence in the same language as the user. "
-    "Sound human and warm. No bullet lists, under 25 words. Do not mention databases."
+    "Be natural, friendly, and conversational like a helpful support agent. Use warm language. "
+    "Reply in ONE short sentence in the same language as the user. No bullet lists, under 25 words."
 )
 
 
@@ -118,24 +118,23 @@ def _messages_from_history(
 
 
 _NATURAL_CONV_SYSTEM = (
-    "You are a warm, capable support teammate for this Discord server. "
-    "The user's latest message is short and interpersonal (e.g. asking if you can help, whether you're there). "
-    "It is not a detailed factual question yet.\n\n"
-    "Reply in the same language as the user (BCP-47 hint: {lang}). "
-    "Sound natural and human — one or two short sentences.\n\n"
+    "Be natural, friendly, and conversational like a helpful support agent. Use warm language. "
+    "You are a capable teammate for this Discord server. "
+    "The user's latest message is short and interpersonal — not a detailed factual question yet.\n\n"
+    "Reply in the same language as the user (BCP-47 hint: {lang}). One or two short sentences.\n\n"
     "If they ask whether you can help, say yes and invite them to describe their issue.\n"
-    "Do NOT mention knowledge bases, search, embeddings, or that you lack information.\n\n"
+    "Do NOT mention knowledge bases, search, or embeddings.\n\n"
     "{guild_extra}"
 )
 
 _NO_KB_GROUND_SYSTEM = (
-    "You are the support assistant for this Discord server. "
-    "For this turn you do not have verified help articles to quote — do not invent prices, policies, or product facts.\n\n"
+    "Be natural, friendly, and conversational like a helpful support agent. Use warm language. "
+    "You assist this Discord server. This turn has no verified excerpts to quote — "
+    "do not invent prices, policies, or product facts.\n\n"
     "Reply in the same language as the user (hint: {lang}). Be empathetic and clear.\n"
-    "Acknowledge their message. If they asked something specific you cannot verify, ask 1–2 focused clarifying questions "
-    "or offer to connect them with a human teammate.\n\n"
-    "Never say you 'searched a knowledge base', 'lack relevant knowledge', or similar robotic phrases — "
-    "write like a helpful colleague who wants the next message to move things forward.\n\n"
+    "Acknowledge their message. If they need specifics you cannot verify, ask 1–2 focused questions "
+    "or offer a human teammate.\n\n"
+    "Avoid robotic phrases about 'knowledge bases' or 'no information' — sound human.\n\n"
     "{guild_extra}"
 )
 
@@ -260,7 +259,7 @@ async def get_support_reply_without_kb_chunks(
 
 
 async def get_ai_response(
-    prompt_context: PromptContext, max_tokens: int = 400
+    prompt_context: PromptContext, max_tokens: int = 350
 ) -> Tuple[str, int, int]:
     """Knowledge-grounded completion. Caller must pass chunks only when RAG applies."""
     if not prompt_context.knowledge_chunks:
@@ -275,8 +274,8 @@ async def get_ai_response(
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
-            max_tokens=min(max_tokens, config.openai_max_tokens, 450),
-            temperature=0.32,
+            max_tokens=min(max_tokens, config.openai_max_tokens, 350),
+            temperature=0.28,
             api_key=api_key,
         )
     except Exception as exc:  # pragma: no cover - provider-specific errors
