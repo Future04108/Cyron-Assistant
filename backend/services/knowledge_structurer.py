@@ -605,3 +605,169 @@ async def run_smart_ingestion_pipeline(
         structured_for_legacy=structured_for_legacy,
         warnings=dedup_warnings,
     )
+
+
+# Supported dashboard templates (extend DB enum / UI together).
+TEMPLATE_TYPES_KNOWN = frozenset(
+    {
+        "general_knowledge",
+        "problem_solution",
+        "product_info",
+        "behavior_rule",
+    }
+)
+
+
+async def auto_format_knowledge(
+    raw_text: str,
+    template_type: str,
+    title_hint: str = "",
+) -> dict[str, Any]:
+    """
+    Turn noisy pasted text into structured fields for the chosen template.
+    Used by POST /knowledge/format — caller persists via structured ingest (no raw duplicate).
+    """
+    raw = _normalize_whitespace(raw_text or "")
+    if not raw:
+        return {
+            "title": (title_hint or "Knowledge Entry").strip() or "Knowledge Entry",
+            "template_type": template_type,
+            "main_content": "",
+            "additional_context": None,
+            "behavior_notes": None,
+            "template_payload": None,
+            "content_markdown": "",
+        }
+
+    tt = (template_type or "problem_solution").strip()
+    if tt not in TEMPLATE_TYPES_KNOWN:
+        tt = "problem_solution"
+
+    if not config.openai_api_key:
+        # Heuristic fallback — still usable offline
+        if tt == "problem_solution":
+            title = (title_hint or "Support topic").strip() or "Support topic"
+            return {
+                "title": title,
+                "template_type": "problem_solution",
+                "main_content": raw[:2200],
+                "additional_context": None,
+                "behavior_notes": None,
+                "template_payload": {"problem": "Customer question (refine manually)", "solution": raw[:2200]},
+                "content_markdown": f"## Problem\nCustomer question (refine manually)\n\n## Solution\n{raw[:2200]}",
+            }
+        return {
+            "title": (title_hint or "Knowledge Entry").strip() or "Knowledge Entry",
+            "template_type": "general_knowledge",
+            "main_content": raw[:4000],
+            "additional_context": None,
+            "behavior_notes": None,
+            "template_payload": None,
+            "content_markdown": raw[:4000],
+        }
+
+    if tt == "problem_solution":
+        prompt = (
+            "You structure support knowledge for a Discord ticket bot. "
+            "From the RAW text, infer a concise customer-style PROBLEM question (Italian or same language as source) "
+            "and a factual SOLUTION the team would send (prices, durations, delivery, payment — only from the text). "
+            "Return strict JSON only: "
+            '{"title":"short dashboard title","problem":"...","solution":"..."} '
+            "No markdown in JSON values. Do not invent facts; omit unknown details."
+        )
+    elif tt == "general_knowledge":
+        prompt = (
+            "Structure this into a knowledge article. Return strict JSON only: "
+            '{"title":"...","main_content":"core facts","additional_context":null|string,"behavior_notes":null|string}. '
+            "Preserve source language. Deduplicate; do not invent facts."
+        )
+    elif tt == "product_info":
+        prompt = (
+            "Extract product-oriented facts. Return strict JSON: "
+            '{"title":"...","main_content":"summary","template_payload":{"product_name":"","summary":"","details":""}}. '
+            "Only facts from the text."
+        )
+    else:  # behavior_rule
+        prompt = (
+            "Extract behavior / policy rules. Return strict JSON: "
+            '{"title":"...","main_content":"what the bot should do","template_payload":{"rule":"","exceptions":""}}.'
+        )
+
+    try:
+        response = await acompletion(
+            model=STRUCTURE_MODEL,
+            messages=[
+                {"role": "system", "content": "You output JSON only. No markdown fences."},
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\nTITLE_HINT:\n{title_hint}\n\nRAW:\n{raw[:14000]}",
+                },
+            ],
+            max_tokens=900,
+            temperature=0.0,
+            api_key=config.openai_api_key,
+        )
+        text = response.choices[0].message.content if response and response.choices else ""
+        parsed = _extract_json_object(text or "")
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception as exc:
+        logger.warning("auto_format_failed", error=str(exc))
+        parsed = {}
+
+    if tt == "problem_solution":
+        title = _normalize_whitespace(str(parsed.get("title") or title_hint or "Support topic"))
+        problem = _normalize_whitespace(str(parsed.get("problem") or ""))
+        solution = _normalize_whitespace(str(parsed.get("solution") or ""))
+        if not solution:
+            solution = raw[:2200]
+        if not problem:
+            problem = "Domanda cliente (da rifinire)"
+        md = f"## Problem\n{problem}\n\n## Solution\n{solution}"
+        return {
+            "title": title or "Support topic",
+            "template_type": "problem_solution",
+            "main_content": solution,
+            "additional_context": problem,
+            "behavior_notes": None,
+            "template_payload": {"problem": problem, "solution": solution},
+            "content_markdown": md,
+        }
+
+    if tt == "general_knowledge":
+        title = _normalize_whitespace(str(parsed.get("title") or title_hint or "Knowledge Entry"))
+        main_c = _normalize_whitespace(str(parsed.get("main_content") or raw))
+        add_c = parsed.get("additional_context")
+        beh = parsed.get("behavior_notes")
+        add_s = _normalize_whitespace(str(add_c)) if add_c else None
+        beh_s = _normalize_whitespace(str(beh)) if beh else None
+        parts = [main_c]
+        if add_s:
+            parts.append(f"Additional Context:\n{add_s}")
+        if beh_s:
+            parts.append(f"Behavior Notes:\n{beh_s}")
+        return {
+            "title": title or "Knowledge Entry",
+            "template_type": "general_knowledge",
+            "main_content": main_c,
+            "additional_context": add_s,
+            "behavior_notes": beh_s,
+            "template_payload": None,
+            "content_markdown": "\n\n".join(parts),
+        }
+
+    # product_info / behavior_rule — store flexible payload for future UI
+    title = _normalize_whitespace(str(parsed.get("title") or title_hint or "Entry"))
+    main_c = _normalize_whitespace(str(parsed.get("main_content") or raw))
+    tp = parsed.get("template_payload")
+    if not isinstance(tp, dict):
+        tp = {}
+    return {
+        "title": title,
+        "template_type": tt,
+        "main_content": main_c,
+        "additional_context": None,
+        "behavior_notes": None,
+        "template_payload": tp,
+        "content_markdown": main_c,
+    }

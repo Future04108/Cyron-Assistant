@@ -36,6 +36,7 @@ def _knowledge_suffix(user_language: str, mode: RetrievalMode) -> str:
         "You may combine facts, apply obvious arithmetic from stated numbers, and draw careful "
         "inferences clearly supported by the text. "
         "Do not invent policies, prices, or features not stated or clearly implied. "
+        "Never promise emails, refunds, delivery dates, or account actions unless explicitly written in the excerpts. "
         "Never say 'knowledge base', 'search', 'database', or 'according to my sources' to the user. "
         "Do not use external or web knowledge."
     )
@@ -43,6 +44,7 @@ def _knowledge_suffix(user_language: str, mode: RetrievalMode) -> str:
         return (
             f"{base_tone} "
             "Prioritize main_content first; then additional_context and behavior_notes when relevant. "
+            "Keep answers short for Discord: prefer 2–4 sentences unless the user asks for detail. "
             "For prices and tiers, quote values from the text; if missing, say so briefly."
         )
     if mode == "moderate":

@@ -16,7 +16,7 @@ from backend.services.limit_service import (
     check_daily_ticket_limit,
     check_monthly_tokens,
 )
-from backend.config import MIN_SIMILARITY_RETRIEVAL
+from backend.config import MIN_SIMILARITY_RETRIEVAL, SIMILARITY_HIGH
 from backend.services.ai_service import (
     AIServiceError,
     get_ai_response,
@@ -251,6 +251,16 @@ async def relay_message(
                     user_language=lang,
                 )
                 prompt_context = built["prompt_context"]
+                # Lightweight path: short user message + one strong KB hit → fewer tokens.
+                qtext = (payload.content or "").strip()
+                short_user = len(qtext) < 140 and len(qtext.split()) <= 18
+                if (
+                    short_user
+                    and built.get("retrieval_mode") == "high"
+                    and len(knowledge_chunks) == 1
+                    and top_similarity >= SIMILARITY_HIGH
+                ):
+                    prompt_context.compact_reply = True
 
                 if not prompt_context.knowledge_chunks:
                     try:
@@ -279,11 +289,13 @@ async def relay_message(
                 else:
                     try:
                         reply, prompt_tokens, completion_tokens = await get_ai_response(
-                            prompt_context, max_tokens=350
+                            prompt_context, max_tokens=250
                         )
                         logger.info(
                             "relay_path",
-                            path="knowledge_rag",
+                            path="knowledge_rag_compact"
+                            if getattr(prompt_context, "compact_reply", False)
+                            else "knowledge_rag",
                             lang=lang,
                             top_similarity=top_similarity,
                             retrieval_mode=built["retrieval_mode"],

@@ -28,6 +28,10 @@ class PromptContext(BaseModel):
         default="none",
         description="none | moderate | high — KB match tier for this turn",
     )
+    compact_reply: bool = Field(
+        default=False,
+        description="Short Discord-optimized reply (low tokens)",
+    )
 
 
 class TokenUsage(BaseModel):

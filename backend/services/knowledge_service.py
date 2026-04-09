@@ -14,8 +14,14 @@ from backend.config import MIN_SIMILARITY_THRESHOLD
 from backend.models.knowledge import Knowledge
 from backend.services.knowledge_structurer import (
     embedding_text_for_chunk,
+    deduplicate_enriched_chunks_against_guild,
     run_smart_ingestion_pipeline,
 )
+from backend.services.semantic_query_expansion import (
+    expand_query_for_retrieval,
+    expand_storage_embedding_text,
+)
+from backend.schemas.knowledge import KnowledgeCreate
 from backend.utils.embeddings import embed_text, cosine_similarity
 
 logger = structlog.get_logger(__name__)
@@ -169,13 +175,26 @@ def _truncate(value: str | None, limit: int) -> str | None:
 
 def build_injection_chunk(knowledge: Knowledge, query: str) -> dict[str, str]:
     """Build minimal retrieval chunk with relevance-aware optional fields."""
-    _, parsed_main, parsed_additional, parsed_notes = _smart_parse_structured_content(
-        knowledge.title,
-        knowledge.content,
-    )
-    main_content = (knowledge.main_content or parsed_main or knowledge.content).strip()
-    additional_context = (knowledge.additional_context or parsed_additional or "").strip()
-    behavior_notes = (knowledge.behavior_notes or parsed_notes or "").strip()
+    tp = knowledge.template_payload if isinstance(knowledge.template_payload, dict) else None
+    if (knowledge.template_type or "") == "problem_solution" and tp:
+        problem = str(tp.get("problem") or "").strip()
+        solution = str(tp.get("solution") or "").strip() or (
+            (knowledge.main_content or "").strip()
+        )
+        main_content = solution or (knowledge.main_content or knowledge.content or "").strip()
+        additional_context = (
+            problem
+            or (knowledge.additional_context or "").strip()
+        )
+        behavior_notes = (knowledge.behavior_notes or "").strip()
+    else:
+        _, parsed_main, parsed_additional, parsed_notes = _smart_parse_structured_content(
+            knowledge.title,
+            knowledge.content,
+        )
+        main_content = (knowledge.main_content or parsed_main or knowledge.content).strip()
+        additional_context = (knowledge.additional_context or parsed_additional or "").strip()
+        behavior_notes = (knowledge.behavior_notes or parsed_notes or "").strip()
 
     chunk: dict[str, str] = {
         "title": knowledge.title,
@@ -208,6 +227,114 @@ async def get_knowledge_total_chars(session: AsyncSession, guild_id: int) -> int
     return int(result.scalar_one() or 0)
 
 
+def _plan_total_limit(plan: str) -> int:
+    plan_key = (plan or "free").lower()
+    return KNOWLEDGE_CHAR_LIMITS.get(plan_key, KNOWLEDGE_CHAR_LIMITS["free"])
+
+
+async def create_structured_knowledge(
+    session: AsyncSession,
+    guild_id: int,
+    body: KnowledgeCreate,
+    plan: str = "free",
+) -> List[Knowledge]:
+    """
+    Persist dashboard-structured rows without the smart-ingestion pipeline.
+    No raw_content — embeddings use title + main + template_payload expansion.
+    """
+    title = (body.title or "").strip() or "Knowledge Entry"
+    template_type = (body.template_type or "general_knowledge").strip()
+    main_body = (body.main_content or "").strip()
+    content_display = (body.content or "").strip()
+    if not main_body and content_display:
+        main_body = _normalize_whitespace(content_display)
+    if not content_display and main_body:
+        content_display = main_body
+
+    tp = body.template_payload if isinstance(body.template_payload, dict) else None
+    additional_ctx = body.additional_context
+    if template_type == "problem_solution" and tp:
+        prob = str(tp.get("problem") or "").strip()
+        sol = str(tp.get("solution") or "").strip()
+        if sol:
+            main_body = sol
+        if prob and not (additional_ctx or "").strip():
+            additional_ctx = prob
+        if not content_display:
+            content_display = f"## Problem\n{prob}\n\n## Solution\n{main_body}"
+
+    if not main_body.strip():
+        raise EntryTooLargeError("Structured knowledge requires main content (or solution).")
+
+    entry_len = len(title) + len(content_display or main_body)
+    if entry_len > MAX_ENTRY_CHARS:
+        raise EntryTooLargeError(
+            "Knowledge entry exceeds 6000 characters. Please shorten or split."
+        )
+
+    total_limit = _plan_total_limit(plan)
+    current_total = await get_knowledge_total_chars(session, guild_id)
+    new_chars = len(title) + len(content_display or main_body) + 32
+    if current_total + new_chars > total_limit:
+        raise GuildTotalLimitError(
+            "Guild has reached total knowledge limit for your plan. Upgrade or remove entries."
+        )
+
+    emb_line = expand_storage_embedding_text(title, main_body, tp)
+    if not emb_line.strip():
+        emb_line = f"{title}\n{main_body}"
+
+    dedup_chunk = {
+        "text": main_body,
+        "topic": title[:200],
+        "intent": "inform",
+        "context": "",
+    }
+    kept, _warnings = await deduplicate_enriched_chunks_against_guild(
+        session, guild_id, [dedup_chunk]
+    )
+    if not kept:
+        raise IngestionDuplicateError(
+            "This content matches existing knowledge too closely (duplicate)."
+        )
+
+    vec = embed_text(emb_line)
+    structured_chunks: list[dict[str, Any]] = [
+        {
+            "text": main_body,
+            "topic": "",
+            "intent": "inform",
+            "context": "",
+            "index": 0,
+        }
+    ]
+
+    row = Knowledge(
+        guild_id=guild_id,
+        title=title,
+        content=content_display or main_body,
+        main_content=main_body,
+        additional_context=additional_ctx,
+        behavior_notes=body.behavior_notes,
+        template_type=template_type,
+        template_payload=tp,
+        source=(body.source or "").strip() or None,
+        raw_content=None,
+        structured_chunks=structured_chunks,
+        chunk_index=0,
+        embedding=vec,
+    )
+    session.add(row)
+    await session.flush()
+
+    logger.info(
+        "knowledge_created_structured",
+        guild_id=guild_id,
+        template_type=template_type,
+    )
+    return [row]
+
+
 async def create_knowledge_with_chunking(
     session: AsyncSession,
     guild_id: int,
@@ -234,7 +361,7 @@ async def create_knowledge_with_chunking(
         )
 
     plan_key = plan.lower()
-    total_limit = KNOWLEDGE_CHAR_LIMITS.get(plan_key, KNOWLEDGE_CHAR_LIMITS["free"])
+    total_limit = _plan_total_limit(plan)
 
     current_total = await get_knowledge_total_chars(session, guild_id)
 
@@ -301,7 +428,8 @@ async def create_knowledge_with_chunking(
         row_content = _format_chunk_row_content(meta, sp)
         clean_meta = {k: str(v) for k, v in meta.items() if k not in ("index", "text")}
         emb_in = embedding_text_for_chunk({**clean_meta, "text": sp})
-        embedding = embed_text(emb_in)
+        rich = expand_storage_embedding_text(row_title, sp, None)
+        embedding = embed_text(f"{rich}\n\n{emb_in}".strip())
         knowledge = Knowledge(
             guild_id=guild_id,
             title=row_title,
@@ -309,7 +437,10 @@ async def create_knowledge_with_chunking(
             main_content=sp,
             additional_context=additional_context,
             behavior_notes=behavior_notes,
-            raw_content=pipeline.raw_content,
+            template_type="general_knowledge",
+            template_payload=None,
+            source=None,
+            raw_content=None,
             structured_chunks=serializable_chunks,
             chunk_index=idx,
             embedding=embedding,
@@ -367,11 +498,88 @@ async def update_knowledge(
     main_content: str | None = None,
     additional_context: str | None = None,
     behavior_notes: str | None = None,
+    template_type: str | None = None,
+    template_payload: dict[str, Any] | None = None,
+    source: str | None = None,
+    persist_mode: str | None = None,
+    plan: str = "free",
 ) -> Knowledge | None:
-    """Update single knowledge entry with smart ingestion (single stored row)."""
+    """Update knowledge — smart pipeline or structured row (no duplicate raw_content)."""
     k = await get_knowledge_by_id(session, knowledge_id, guild_id)
     if not k:
         return None
+
+    mode = persist_mode or "pipeline"
+    if mode == "structured":
+        new_title = (title if title is not None else k.title or "Knowledge Entry").strip()
+        new_main = (main_content if main_content is not None else k.main_content or "").strip()
+        new_content = (content if content is not None else k.content or "").strip()
+        if not new_main and new_content:
+            new_main = new_content
+        if not new_content and new_main:
+            new_content = new_main
+        add_ctx = additional_context if additional_context is not None else k.additional_context
+        beh = behavior_notes if behavior_notes is not None else k.behavior_notes
+        tt = (template_type or k.template_type or "general_knowledge").strip()
+        tp = template_payload if template_payload is not None else k.template_payload
+        if not isinstance(tp, dict):
+            tp = None
+        src = source if source is not None else k.source
+
+        if tt == "problem_solution" and tp:
+            prob = str(tp.get("problem") or "").strip()
+            sol = str(tp.get("solution") or "").strip()
+            if sol:
+                new_main = sol
+            if prob and not (add_ctx or "").strip():
+                add_ctx = prob
+            if not new_content:
+                new_content = f"## Problem\n{prob}\n\n## Solution\n{new_main}"
+
+        if not new_main.strip():
+            raise EntryTooLargeError("Structured update requires main content.")
+
+        entry_len = len(new_title) + len(new_content or new_main)
+        if entry_len > MAX_ENTRY_CHARS:
+            raise EntryTooLargeError(
+                "Knowledge entry exceeds 6000 characters. Please shorten or split."
+            )
+
+        current_total = await get_knowledge_total_chars(session, guild_id)
+        old_len = len(k.title) + len(k.content)
+        delta = entry_len - old_len
+        total_limit = _plan_total_limit(plan)
+        if current_total + delta > total_limit:
+            raise GuildTotalLimitError(
+                "Guild has reached total knowledge limit for your plan. Upgrade or remove entries."
+            )
+
+        emb_line = expand_storage_embedding_text(new_title, new_main, tp)
+        if not emb_line.strip():
+            emb_line = f"{new_title}\n{new_main}"
+
+        k.title = new_title
+        k.content = new_content or new_main
+        k.main_content = new_main
+        k.additional_context = add_ctx
+        k.behavior_notes = beh
+        k.template_type = tt
+        k.template_payload = tp
+        k.source = (src or "").strip() or None
+        k.raw_content = None
+        k.structured_chunks = [
+            {
+                "text": new_main,
+                "topic": "",
+                "intent": "inform",
+                "context": "",
+                "index": 0,
+            }
+        ]
+        k.chunk_index = 0
+        k.embedding = embed_text(emb_line)
+        await session.flush()
+        return k
 
     incoming_title = title if title is not None else (k.title or "Knowledge Entry")
     incoming_content = content if content is not None else (k.content or "")
@@ -421,11 +629,10 @@ async def update_knowledge(
     old_len = len(k.title) + len(k.content)
     delta = entry_len - old_len
 
-    total_limit = KNOWLEDGE_CHAR_LIMITS["free"]
+    total_limit = _plan_total_limit(plan)
     if current_total + delta > total_limit:
         raise GuildTotalLimitError(
-            "Guild has reached total knowledge limit for your plan (Free: 20k chars). "
-            "Upgrade or remove entries."
+            "Guild has reached total knowledge limit for your plan. Upgrade or remove entries."
         )
 
     emb_parts: list[str] = []
@@ -437,13 +644,20 @@ async def update_knowledge(
         meta["text"] = ct
         emb_parts.append(embedding_text_for_chunk(meta))
     combined_emb = "\n\n".join(emb_parts) if emb_parts else new_title + "\n" + main_body
+    rich = expand_storage_embedding_text(new_title, main_body, None)
+    combined_emb = f"{rich}\n\n{combined_emb}".strip()
 
     k.title = new_title
     k.content = new_content
     k.main_content = main_body
     k.additional_context = additional_context
     k.behavior_notes = behavior_notes
-    k.raw_content = pipeline.raw_content
+    k.template_type = template_type or k.template_type or "general_knowledge"
+    if template_payload is not None:
+        k.template_payload = template_payload
+    if source is not None:
+        k.source = (source or "").strip() or None
+    k.raw_content = None
     k.structured_chunks = [dict(x) for x in pipeline.structured_chunks if isinstance(x, dict)]
     k.chunk_index = 0
     k.embedding = embed_text(combined_emb)
@@ -493,6 +707,8 @@ async def search_knowledge(
     eq = (embedding_query or "").strip()
     if eq and eq != query.strip():
         q2 = embed_text(eq)
+    expanded_line = expand_query_for_retrieval(query, eq or query)
+    q3 = embed_text(expanded_line) if expanded_line.strip() else None
 
     scored = []
     for k in all_k:
@@ -500,6 +716,8 @@ async def search_knowledge(
             sim = cosine_similarity(q1, k.embedding)
             if q2 is not None:
                 sim = max(sim, cosine_similarity(q2, k.embedding))
+            if q3 is not None:
+                sim = max(sim, cosine_similarity(q3, k.embedding))
             scored.append((sim, k))
     scored.sort(key=lambda x: x[0], reverse=True)
     if not scored:

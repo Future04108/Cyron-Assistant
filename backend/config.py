@@ -8,9 +8,9 @@ load_dotenv()
 # Below this vs top retrieved score → low_confidence flag for UI/analytics.
 MIN_SIMILARITY_THRESHOLD: float = 0.55
 # Strict KB-anchored answers (high similarity).
-SIMILARITY_HIGH: float = 0.55
+SIMILARITY_HIGH: float = 0.60
 # Minimum similarity to inject KB at all (best-effort / moderate band is [floor, high)).
-SIMILARITY_MODERATE_FLOOR: float = 0.30
+SIMILARITY_MODERATE_FLOOR: float = 0.28
 # Minimum score to return candidates from vector search (below → no KB injection).
 MIN_SIMILARITY_RETRIEVAL: float = 0.30
 

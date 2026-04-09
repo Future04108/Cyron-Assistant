@@ -12,21 +12,39 @@ from backend.schemas.relay import PromptContext
 
 logger = structlog.get_logger(__name__)
 
+_COMPACT_MAIN_LIM = 700
+_COMPACT_ADD_LIM = 400
+_FULL_MAIN_LIM = 2800
 
 class AIServiceError(Exception):
     """Raised when the AI provider call fails."""
+
+
+def _truncate_kb(s: str, lim: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= lim:
+        return s
+    return s[: lim - 1].rstrip() + "…"
 
 
 def _build_knowledge_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
     messages: list[dict[str, str]] = [
         {"role": "system", "content": prompt_context.system_prompt},
     ]
+    compact = bool(getattr(prompt_context, "compact_reply", False))
+    main_lim = _COMPACT_MAIN_LIM if compact else _FULL_MAIN_LIM
+    add_lim = _COMPACT_ADD_LIM if compact else 900
+
     parts: list[str] = []
     for idx, chunk in enumerate(prompt_context.knowledge_chunks, start=1):
         title = str(chunk.get("title", "")).strip()
         main_content = str(chunk.get("main_content", chunk.get("content", ""))).strip()
         additional_context = str(chunk.get("additional_context", "")).strip()
         behavior_notes = str(chunk.get("behavior_notes", "")).strip()
+        if compact:
+            main_content = _truncate_kb(main_content, main_lim)
+            additional_context = _truncate_kb(additional_context, add_lim)
+            behavior_notes = _truncate_kb(behavior_notes, 200)
         header = f"[{idx}] {title}" if title else f"[{idx}]"
         body_parts = [f"main_content:\n{main_content}"]
         if additional_context:
@@ -36,7 +54,12 @@ def _build_knowledge_messages(prompt_context: PromptContext) -> List[Dict[str, s
         parts.append(f"{header}\n" + "\n".join(body_parts))
 
     mode = getattr(prompt_context, "retrieval_mode", None) or "high"
-    if mode == "moderate":
+    if compact:
+        intro = (
+            "Facts below only. Reply in the user's language with 1–3 short sentences. "
+            "No bullet lists unless they asked. No promises not in the text.\n\n"
+        )
+    elif mode == "moderate":
         intro = (
             "Below are the best-matching help excerpts (partial match to the user's wording is OK). "
             "Acknowledge their intent in your reply, then answer only from this material:\n\n"
@@ -267,7 +290,7 @@ async def get_support_reply_without_kb_chunks(
 
 
 async def get_ai_response(
-    prompt_context: PromptContext, max_tokens: int = 350
+    prompt_context: PromptContext, max_tokens: int = 250
 ) -> Tuple[str, int, int]:
     """Knowledge-grounded completion. Caller must pass chunks only when RAG applies."""
     if not prompt_context.knowledge_chunks:
@@ -280,12 +303,14 @@ async def get_ai_response(
 
     mode = getattr(prompt_context, "retrieval_mode", None) or "high"
     temp = 0.32 if mode == "moderate" else 0.26
+    compact = bool(getattr(prompt_context, "compact_reply", False))
+    cap = min(115, max_tokens) if compact else min(250, max_tokens)
 
     try:
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
-            max_tokens=min(max_tokens, config.openai_max_tokens, 350),
+            max_tokens=min(cap, config.openai_max_tokens, 350),
             temperature=temp,
             api_key=api_key,
         )

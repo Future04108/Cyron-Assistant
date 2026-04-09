@@ -26,7 +26,11 @@ class Knowledge(Base):
     main_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     additional_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     behavior_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Ingestion pipeline: original submission + enriched atomic units (same on each row of a batch).
+    # Template system (v2): general_knowledge | problem_solution | product_info | behavior_rule
+    template_type: Mapped[str] = mapped_column(String(64), nullable=False, default="general_knowledge")
+    template_payload: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Deprecated: kept for DB compatibility; always null on new writes (no duplicate raw noise).
     raw_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     structured_chunks: Mapped[list | dict | None] = mapped_column(JSONB, nullable=True)
     chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)

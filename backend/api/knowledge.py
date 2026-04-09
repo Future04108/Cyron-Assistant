@@ -7,13 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
 from backend.dependencies import require_guild_admin
-from backend.schemas.knowledge import KnowledgeCreate, KnowledgeUpdate, KnowledgeResponse
+from backend.schemas.knowledge import (
+    KnowledgeCreate,
+    KnowledgeFormatRequest,
+    KnowledgeFormatResponse,
+    KnowledgeUpdate,
+    KnowledgeResponse,
+)
 from backend.services.guild_service import get_guild
+from backend.services.knowledge_structurer import auto_format_knowledge
 from backend.services.knowledge_service import (
     GuildTotalLimitError,
     EntryTooLargeError,
     IngestionDuplicateError,
     create_knowledge_with_chunking,
+    create_structured_knowledge,
     get_knowledge_by_id,
     list_knowledge,
     update_knowledge,
@@ -32,6 +40,9 @@ def _knowledge_response_row(k) -> KnowledgeResponse:
         main_content=k.main_content,
         additional_context=k.additional_context,
         behavior_notes=k.behavior_notes,
+        template_type=getattr(k, "template_type", None) or "general_knowledge",
+        template_payload=k.template_payload if isinstance(k.template_payload, dict) else None,
+        source=k.source,
         raw_content=k.raw_content,
         structured_chunks=k.structured_chunks,
         chunk_index=k.chunk_index,
@@ -53,28 +64,60 @@ async def list_guild_knowledge(
     return [_knowledge_response_row(k) for k in items]
 
 
+@router.post("/format", response_model=KnowledgeFormatResponse)
+async def format_knowledge_draft(
+    guild_id: int = Depends(require_guild_admin),
+    body: KnowledgeFormatRequest = Body(...),
+    session: AsyncSession = Depends(get_session),
+):
+    """AUTO FORMAT — structure raw text for a template (no DB write)."""
+    guild = await get_guild(session, guild_id)
+    if not guild:
+        raise HTTPException(status_code=404, detail="Guild not found")
+
+    out = await auto_format_knowledge(
+        body.raw_text,
+        body.template_type,
+        title_hint=body.title_hint or "",
+    )
+    return KnowledgeFormatResponse(
+        title=out["title"],
+        template_type=out["template_type"],
+        main_content=out["main_content"],
+        additional_context=out.get("additional_context"),
+        behavior_notes=out.get("behavior_notes"),
+        template_payload=out.get("template_payload"),
+        content_markdown=out.get("content_markdown") or out["main_content"],
+    )
+
+
 @router.post("", response_model=KnowledgeResponse)
 async def create_guild_knowledge(
     guild_id: int = Depends(require_guild_admin),
     body: KnowledgeCreate = Body(...),
     session: AsyncSession = Depends(get_session),
 ):
-    """Create knowledge entry with validation and chunking."""
+    """Create knowledge entry with validation and chunking or structured ingest."""
     guild = await get_guild(session, guild_id)
     if not guild:
         raise HTTPException(status_code=404, detail="Guild not found")
 
     try:
-        created = await create_knowledge_with_chunking(
-            session,
-            guild_id,
-            body.title,
-            body.content,
-            main_content=body.main_content,
-            additional_context=body.additional_context,
-            behavior_notes=body.behavior_notes,
-            plan=guild.plan,
-        )
+        if body.persist_mode == "structured":
+            created = await create_structured_knowledge(
+                session, guild_id, body, plan=guild.plan or "free"
+            )
+        else:
+            created = await create_knowledge_with_chunking(
+                session,
+                guild_id,
+                body.title,
+                body.content,
+                main_content=body.main_content,
+                additional_context=body.additional_context,
+                behavior_notes=body.behavior_notes,
+                plan=guild.plan,
+            )
     except EntryTooLargeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except GuildTotalLimitError as e:
@@ -125,6 +168,11 @@ async def update_guild_knowledge(
             main_content=body.main_content,
             additional_context=body.additional_context,
             behavior_notes=body.behavior_notes,
+            template_type=body.template_type,
+            template_payload=body.template_payload,
+            source=body.source,
+            persist_mode=body.persist_mode,
+            plan=guild.plan or "free",
         )
     except EntryTooLargeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
