@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,8 @@ from backend.services.limit_service import (
     check_monthly_tokens,
 )
 from backend.config import (
+    COMPACT_CACHE_TTL_SEC,
+    COMPACT_EARLY_EXIT_SIM,
     COMPACT_HIGH_MATCH,
     COMPACT_MAX_QUERY_CHARS,
     COMPACT_MAX_QUERY_WORDS,
@@ -51,12 +54,23 @@ from backend.utils.embeddings import embed_text
 logger = structlog.get_logger()
 router = APIRouter(prefix="/relay", tags=["relay"])
 
-_CACHE_TTL_SEC = 600
-
-
 def _is_simple_query(text: str) -> bool:
     q = (text or "").strip()
     return len(q) <= COMPACT_MAX_QUERY_CHARS and len(q.split()) <= COMPACT_MAX_QUERY_WORDS
+
+
+def _looks_like_simple_faq(text: str) -> bool:
+    """Heuristic: price / availability / duration questions (v2.2)."""
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    patterns = (
+        r"\b(how much|price|cost|€|\$|eur|usd|robux)\b",
+        r"\b(vendete|avete|quanto costa|quanto tempo|abbonamento|annuale|mensile|disponib|spotify)\b",
+        r"\b(shipping|delivery|consegna|arriva|minuti|ore)\b",
+        r"\b(do you sell|do you have|is there|available)\b",
+    )
+    return any(re.search(p, q, re.I) for p in patterns)
 
 
 def _response_cache_key(guild_id: int, text: str, lang: str) -> str:
@@ -68,6 +82,36 @@ def _response_cache_key(guild_id: int, text: str, lang: str) -> str:
     except Exception:
         digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
     return f"relay:short:{guild_id}:{lang}:{digest}"
+
+
+def _response_cache_key_fuzzy(guild_id: int, text: str, lang: str) -> str:
+    """Forgiving cache key — quantized embedding prefix (~neighborhood matches)."""
+    norm = " ".join((text or "").strip().lower().split())
+    try:
+        vec = embed_text(norm)
+        buckets = ",".join(f"{round(v * 4) / 4:.2f}" for v in vec[:16])
+        digest = hashlib.sha256(buckets.encode("utf-8")).hexdigest()[:24]
+    except Exception:
+        digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+    return f"relay:shortf:{guild_id}:{lang}:{digest}"
+
+
+async def _cache_get_short(redis: Redis, guild_id: int, text: str, lang: str) -> str | None:
+    ek = _response_cache_key(guild_id, text, lang)
+    hit = await redis.get(ek)
+    if hit:
+        return hit
+    fk = _response_cache_key_fuzzy(guild_id, text, lang)
+    return await redis.get(fk)
+
+
+async def _cache_set_short(
+    redis: Redis, guild_id: int, text: str, lang: str, blob: str
+) -> None:
+    ek = _response_cache_key(guild_id, text, lang)
+    fk = _response_cache_key_fuzzy(guild_id, text, lang)
+    await redis.setex(ek, COMPACT_CACHE_TTL_SEC, blob)
+    await redis.setex(fk, COMPACT_CACHE_TTL_SEC, blob)
 
 
 @router.post("", response_model=RelayResponse)
@@ -247,13 +291,13 @@ async def relay_message(
                     )
             else:
                 qtext = (payload.content or "").strip()
-                simple_query = _is_simple_query(qtext)
-                cache_key = _response_cache_key(guild_id, qtext, lang)
-                if simple_query:
-                    cached = await redis.get(cache_key)
-                    if cached:
+                simple_candidate = _is_simple_query(qtext) or _looks_like_simple_faq(qtext)
+
+                if simple_candidate:
+                    cached_raw = await _cache_get_short(redis, guild_id, qtext, lang)
+                    if cached_raw:
                         try:
-                            blob = json.loads(cached)
+                            blob = json.loads(cached_raw)
                             reply = str(blob.get("reply", "")).strip()
                             if reply:
                                 prompt_tokens = 0
@@ -265,6 +309,13 @@ async def relay_message(
                                     user_language=lang,
                                     retrieval_mode="none",
                                     compact_reply=True,
+                                )
+                                logger.info(
+                                    "COMPACT_PATH_TAKEN",
+                                    prompt_tokens=0,
+                                    completion_tokens=0,
+                                    total_tokens=0,
+                                    cache_hit=True,
                                 )
                                 logger.info(
                                     "relay_path",
@@ -296,8 +347,7 @@ async def relay_message(
                             pass
 
                 emb_query = ""
-                if not simple_query:
-                    # English expansion helps when message is not simple/high-confidence.
+                if not simple_candidate:
                     emb_query = await english_for_embedding_search(payload.content)
                 logger.info(
                     "relay_hybrid_retrieval",
@@ -305,31 +355,65 @@ async def relay_message(
                     lang=lang,
                     embedding_expanded=bool(emb_query.strip())
                     and emb_query.strip() != qtext,
+                    simple_candidate=simple_candidate,
                 )
 
                 knowledge_items, top_similarity = await search_knowledge(
                     session,
                     guild_id,
                     payload.content,
-                    top_k=2 if simple_query else 4,
+                    top_k=1 if simple_candidate else 4,
                     min_score=MIN_SIMILARITY_RETRIEVAL,
                     embedding_query=emb_query if emb_query.strip() else None,
+                    skip_expansion=simple_candidate,
+                    early_exit_similarity=COMPACT_EARLY_EXIT_SIM if simple_candidate else None,
                 )
-                if simple_query and top_similarity >= COMPACT_STRONG_MATCH and knowledge_items:
+
+                borderline = COMPACT_HIGH_MATCH <= top_similarity < COMPACT_STRONG_MATCH
+
+                if simple_candidate and top_similarity >= COMPACT_STRONG_MATCH and knowledge_items:
                     knowledge_items = knowledge_items[:1]
+
+                max_for_chunks = 4
+                if simple_candidate:
+                    max_for_chunks = 1 if top_similarity >= COMPACT_STRONG_MATCH else 2
+
                 last_msgs = await get_last_messages(session, ticket.id, limit=6)
                 knowledge_chunks = [
-                    build_injection_chunk(k, payload.content, compact=simple_query)
-                    for k in knowledge_items[: (1 if top_similarity >= COMPACT_STRONG_MATCH else 2 if simple_query else 4)]
+                    build_injection_chunk(
+                        k,
+                        qtext,
+                        compact=simple_candidate,
+                        compact_borderline=borderline,
+                    )
+                    for k in knowledge_items[:max_for_chunks]
                 ]
                 message_history = [
                     {"role": m.role, "content": m.content} for m in last_msgs
                 ]
                 compact_reply = bool(
-                    simple_query
+                    simple_candidate
                     and top_similarity >= COMPACT_HIGH_MATCH
                     and len(knowledge_chunks) <= 2
                 )
+                if (
+                    not compact_reply
+                    and knowledge_chunks
+                    and simple_candidate
+                    and len(knowledge_chunks) <= 2
+                    and top_similarity >= 0.55
+                ):
+                    compact_reply = True
+                    knowledge_chunks = [
+                        build_injection_chunk(
+                            k,
+                            qtext,
+                            compact=True,
+                            compact_borderline=borderline,
+                        )
+                        for k in knowledge_items[: min(2, len(knowledge_items))]
+                    ]
+
                 built = build_prompt_context(
                     guild.system_prompt or "",
                     knowledge_chunks,
@@ -337,7 +421,8 @@ async def relay_message(
                     top_similarity=top_similarity,
                     user_language=lang,
                     compact_reply=compact_reply,
-                    max_chars=900 if compact_reply else 2400,
+                    compact_user_query=qtext if compact_reply else "",
+                    max_chars=520 if compact_reply else 2000,
                 )
                 prompt_context = built["prompt_context"]
 
@@ -369,26 +454,49 @@ async def relay_message(
                     try:
                         reply, prompt_tokens, completion_tokens = await get_ai_response(
                             prompt_context,
-                            max_tokens=150 if compact_reply else 250,
+                            max_tokens=100 if compact_reply else 250,
                         )
-                        if simple_query and (prompt_tokens + completion_tokens) <= 320:
+                        total_ai = int(prompt_tokens) + int(completion_tokens)
+                        if compact_reply:
+                            logger.info(
+                                "COMPACT_PATH_TAKEN",
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=total_ai,
+                                cache_hit=False,
+                            )
+                        if compact_reply and simple_candidate:
+                            kb_snippet = ""
+                            if knowledge_chunks:
+                                kb_snippet = str(
+                                    knowledge_chunks[0].get("main_content", "")
+                                )[:240]
                             try:
-                                await redis.setex(
-                                    cache_key,
-                                    _CACHE_TTL_SEC,
-                                    json.dumps({"reply": reply}, ensure_ascii=False),
+                                await _cache_set_short(
+                                    redis,
+                                    guild_id,
+                                    qtext,
+                                    lang,
+                                    json.dumps(
+                                        {"reply": reply, "kb": kb_snippet},
+                                        ensure_ascii=False,
+                                    ),
                                 )
                             except Exception:
-                                logger.warning("short_query_cache_store_failed", guild_id=guild_id)
+                                logger.warning(
+                                    "short_query_cache_store_failed",
+                                    guild_id=guild_id,
+                                )
                         logger.info(
                             "relay_path",
-                            path="knowledge_rag_compact"
+                            path="knowledge_rag_compact_v22"
                             if getattr(prompt_context, "compact_reply", False)
                             else "knowledge_rag",
                             lang=lang,
                             top_similarity=top_similarity,
                             retrieval_mode=built["retrieval_mode"],
                             guild_id=guild_id,
+                            total_tokens=total_ai,
                         )
                     except AIServiceError as e:
                         logger.error(

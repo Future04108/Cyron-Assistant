@@ -196,11 +196,15 @@ def _compress_for_query(text: str, query: str, limit: int = 300) -> str:
     return out[:limit].strip()
 
 
+_COMPACT_KB_BUDGET = 400
+
+
 def build_injection_chunk(
     knowledge: Knowledge,
     query: str,
     *,
     compact: bool = False,
+    compact_borderline: bool = False,
 ) -> dict[str, str]:
     """Build minimal retrieval chunk with relevance-aware optional fields."""
     tp = knowledge.template_payload if isinstance(knowledge.template_payload, dict) else None
@@ -225,26 +229,40 @@ def build_injection_chunk(
         behavior_notes = (knowledge.behavior_notes or parsed_notes or "").strip()
 
     if compact:
-        main_content = _compress_for_query(main_content, query, limit=300)
-        additional_context = _compress_for_query(additional_context, query, limit=140)
-        behavior_notes = _compress_for_query(behavior_notes, query, limit=100)
+        # v2.2: ultra-tight injection — one blob, ≤400 chars; no behavior_notes.
+        if (knowledge.template_type or "") == "problem_solution" and tp:
+            problem = str(tp.get("problem") or "").strip()
+            solution = str(tp.get("solution") or "").strip() or main_content
+            sol = _compress_for_query(solution, query, limit=340)
+            if compact_borderline and problem:
+                pr = _compress_for_query(problem, query, limit=80)
+                blob = f"{sol}\n(Ref: {pr})" if pr else sol
+            else:
+                blob = sol
+            blob = blob[:_COMPACT_KB_BUDGET].strip()
+            return {
+                "title": (knowledge.title or "")[:60],
+                "main_content": blob,
+            }
+        main_only = _compress_for_query(main_content, query, limit=_COMPACT_KB_BUDGET)
+        if compact_borderline and additional_context:
+            add = _compress_for_query(additional_context, query, limit=140)
+            main_only = f"{main_only}\n{add}"[:_COMPACT_KB_BUDGET].strip()
+        return {
+            "title": (knowledge.title or "")[:60],
+            "main_content": main_only,
+        }
 
     chunk: dict[str, str] = {
         "title": knowledge.title,
-        "main_content": _truncate(
-            main_content,
-            320 if compact else MAX_MAIN_CONTENT_CHARS,
-        )
-        or "",
+        "main_content": _truncate(main_content, MAX_MAIN_CONTENT_CHARS) or "",
     }
-    if additional_context and not compact:
+    if additional_context:
         chunk["additional_context"] = _truncate(
             additional_context, MAX_ADDITIONAL_CONTEXT_CHARS
         ) or ""
-    if behavior_notes and not compact:
+    if behavior_notes:
         chunk["behavior_notes"] = _truncate(behavior_notes, MAX_BEHAVIOR_NOTES_CHARS) or ""
-    if compact and additional_context:
-        chunk["additional_context"] = _truncate(additional_context, 140) or ""
     return chunk
 
 
@@ -725,6 +743,9 @@ async def search_knowledge(
     top_k: int = 4,
     min_score: float = MIN_SIMILARITY_THRESHOLD,
     embedding_query: str | None = None,
+    *,
+    skip_expansion: bool = False,
+    early_exit_similarity: float | None = None,
 ) -> Tuple[list[Knowledge], float]:
     """
     Search knowledge by cosine similarity.
@@ -746,8 +767,11 @@ async def search_knowledge(
     eq = (embedding_query or "").strip()
     if eq and eq != query.strip():
         q2 = embed_text(eq)
-    expanded_line = expand_query_for_retrieval(query, eq or query)
-    q3 = embed_text(expanded_line) if expanded_line.strip() else None
+    if skip_expansion:
+        q3 = None
+    else:
+        expanded_line = expand_query_for_retrieval(query, eq or query)
+        q3 = embed_text(expanded_line) if expanded_line.strip() else None
 
     scored = []
     for k in all_k:
@@ -763,6 +787,21 @@ async def search_knowledge(
         return [], 0.0
 
     top_raw_similarity = float(scored[0][0])
+    if (
+        early_exit_similarity is not None
+        and scored
+        and float(scored[0][0]) >= float(early_exit_similarity)
+    ):
+        s0, k0 = scored[0]
+        if float(s0) >= min_score:
+            logger.debug(
+                "search_knowledge_early_exit",
+                guild_id=guild_id,
+                similarity=float(s0),
+                threshold=float(early_exit_similarity),
+            )
+            return [k0], float(s0)
+
     logger.debug(
         "search_knowledge_scores",
         guild_id=guild_id,

@@ -32,6 +32,10 @@ class PromptContext(BaseModel):
         default=False,
         description="Short Discord-optimized reply (low tokens)",
     )
+    compact_user_query: str = Field(
+        default="",
+        description="Latest user message for compact single-shot prompts",
+    )
 
 
 class TokenUsage(BaseModel):

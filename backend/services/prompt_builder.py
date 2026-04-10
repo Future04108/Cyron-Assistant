@@ -9,19 +9,16 @@ from backend.schemas.relay import PromptContext
 
 RetrievalMode = Literal["none", "moderate", "high"]
 
+# v2.2: ultra-short compact rules (overridden by ai_service single-shot compact path).
 COMPACT_RULES = (
-    "Use only provided knowledge for facts. "
-    "Reply in the same language as the user ({lang}). "
-    "Keep it short and direct for Discord (1-2 sentences when enough). "
-    "No invented details, no mention of sources/search."
+    "Answer ONLY using the knowledge below. Same language as the user. "
+    "Be brief and natural. No facts not in the knowledge."
 )
 
+# v2.2: ~40% shorter than prior standard block.
 STANDARD_TONE = (
-    "Be natural, warm, and conversational. "
-    "Ground factual claims only in the provided passages. "
-    "Reply in the user's language ({lang}). "
-    "Keep answers concise for Discord; avoid unnecessary explanations. "
-    "Do not invent policies, prices, delivery details, or account actions."
+    "Warm, natural Discord support tone. Ground facts only in the passages. "
+    "Same language as the user ({lang}). Keep it concise."
 )
 
 
@@ -36,10 +33,12 @@ def _tier_from_similarity(top_similarity: float, has_chunks: bool) -> RetrievalM
 
 
 def build_compact_prompt(base_prompt: str, user_language: str) -> str:
+    """Minimal system prefix for compact mode (ai_service may replace with single-shot)."""
+    _ = user_language  # language enforced in user message in ai_service compact path
     base = (base_prompt or "").strip()
-    compact = COMPACT_RULES.format(lang=user_language)
+    compact = COMPACT_RULES
     if base:
-        return f"{base}\n\n{compact}"
+        return f"{base}\n{compact}"
     return compact
 
 
@@ -47,17 +46,11 @@ def build_standard_prompt(base_prompt: str, user_language: str, mode: RetrievalM
     base_tone = STANDARD_TONE.format(lang=user_language)
     prefix = (base_prompt or "").strip()
     if mode == "high":
-        suffix = (
-            f"{base_tone} "
-            "Use main_content first, then additional_context/behavior_notes if relevant. "
-            "For prices/tier values, quote only stated numbers."
-        )
+        suffix = f"{base_tone} Use main_content first; quote prices only if stated."
         return f"{prefix}\n\n{suffix}" if prefix else suffix
     if mode == "moderate":
         suffix = (
-            f"{base_tone} "
-            "The match is good but not perfect; acknowledge intent briefly, then answer with available facts. "
-            "If partial coverage, state that briefly and offer concise clarification."
+            f"{base_tone} Match is partial—acknowledge intent briefly, then give what the text supports."
         )
         return f"{prefix}\n\n{suffix}" if prefix else suffix
     return f"{prefix}\n\n{base_tone}" if prefix else base_tone
@@ -89,13 +82,14 @@ def build_prompt_context(
     top_similarity: float,
     user_language: str = "en",
     min_confidence: float = MIN_SIMILARITY_THRESHOLD,
-    max_chars: int = 2_400,
+    max_chars: int = 2_000,
     compact_reply: bool = False,
+    compact_user_query: str = "",
 ) -> BuiltPromptContext:
     """
     Tiers: high (>= SIMILARITY_HIGH), moderate ([SIMILARITY_MODERATE_FLOOR, high)), none below floor or empty.
     """
-    history = message_history[-6:]
+    history = message_history[-6:] if not compact_reply else []
 
     def _chunk_len(chunk: Dict[str, Any]) -> int:
         title = str(chunk.get("title", ""))
@@ -106,7 +100,7 @@ def build_prompt_context(
 
     selected_chunks: list[dict[str, Any]] = []
     total_chars = 0
-    max_chunks = 2 if compact_reply else 4
+    max_chunks = 1 if compact_reply else 4
     for chunk in knowledge_chunks:
         if len(selected_chunks) >= max_chunks:
             break
@@ -126,7 +120,7 @@ def build_prompt_context(
 
     prompt_context = PromptContext(
         system_prompt=_knowledge_system_prompt(
-            system_prompt,
+            "" if compact_reply else system_prompt,
             user_language,
             mode,
             compact_reply=compact_reply,
@@ -136,6 +130,7 @@ def build_prompt_context(
         user_language=user_language,
         retrieval_mode=mode,
         compact_reply=compact_reply,
+        compact_user_query=compact_user_query if compact_reply else "",
     )
 
     return BuiltPromptContext(

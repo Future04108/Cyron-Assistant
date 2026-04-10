@@ -12,9 +12,15 @@ from backend.schemas.relay import PromptContext
 
 logger = structlog.get_logger(__name__)
 
-_COMPACT_MAIN_LIM = 700
-_COMPACT_ADD_LIM = 400
+_COMPACT_MAIN_LIM = 500
+_COMPACT_ADD_LIM = 120
 _FULL_MAIN_LIM = 2800
+
+_COMPACT_SYSTEM = (
+    "You are a helpful Discord support assistant. Answer ONLY using the provided knowledge. "
+    "Be short, natural and friendly. Reply in the same language as the user. "
+    "Never add information not in the knowledge."
+)
 
 class AIServiceError(Exception):
     """Raised when the AI provider call fails."""
@@ -25,6 +31,25 @@ def _truncate_kb(s: str, lim: int) -> str:
     if len(s) <= lim:
         return s
     return s[: lim - 1].rstrip() + "…"
+
+
+def _build_compact_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
+    """Single user turn: minimal tokens (v2.2). No chat history."""
+    parts: list[str] = []
+    for ch in prompt_context.knowledge_chunks:
+        title = str(ch.get("title", "")).strip()
+        body = str(ch.get("main_content", ch.get("content", ""))).strip()
+        if title:
+            parts.append(f"{title}: {body}")
+        else:
+            parts.append(body)
+    kb = "\n".join(p for p in parts if p).strip()[:520]
+    q = str(getattr(prompt_context, "compact_user_query", "") or "").strip()[:420]
+    user_block = f"Knowledge:\n{kb}\n\nUser:\n{q}\nAnswer concisely:"
+    return [
+        {"role": "system", "content": _COMPACT_SYSTEM},
+        {"role": "user", "content": user_block},
+    ]
 
 
 def _build_knowledge_messages(prompt_context: PromptContext) -> List[Dict[str, str]]:
@@ -296,15 +321,22 @@ async def get_ai_response(
     if not prompt_context.knowledge_chunks:
         raise AIServiceError("get_ai_response requires non-empty knowledge_chunks")
 
-    messages = _build_knowledge_messages(prompt_context)
+    compact = bool(getattr(prompt_context, "compact_reply", False))
+    if compact:
+        messages = _build_compact_messages(prompt_context)
+    else:
+        messages = _build_knowledge_messages(prompt_context)
     api_key = config.openai_api_key
     if not api_key:
         raise AIServiceError("OPENAI_API_KEY is not configured.")
 
     mode = getattr(prompt_context, "retrieval_mode", None) or "high"
-    temp = 0.32 if mode == "moderate" else 0.26
-    compact = bool(getattr(prompt_context, "compact_reply", False))
-    cap = min(130, max_tokens) if compact else min(250, max_tokens)
+    if compact:
+        temp = 0.3
+        cap = min(100, max_tokens)
+    else:
+        temp = 0.32 if mode == "moderate" else 0.26
+        cap = min(250, max_tokens)
 
     try:
         response = await acompletion(
@@ -320,16 +352,36 @@ async def get_ai_response(
 
     reply = _extract_reply(response)
     prompt_tokens, completion_tokens = _extract_usage(response)
+    total = prompt_tokens + completion_tokens
+
+    if compact:
+        logger.info(
+            "COMPACT_PATH_TAKEN",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total,
+            knowledge_chunks=len(prompt_context.knowledge_chunks),
+        )
+    else:
+        logger.info(
+            "STANDARD_PATH",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total,
+            knowledge_chunks=len(prompt_context.knowledge_chunks),
+            retrieval_mode=prompt_context.retrieval_mode,
+        )
 
     logger.info(
         "ai_completion_success",
         model=config.openai_model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
+        total_tokens=total,
         knowledge_chunks=len(prompt_context.knowledge_chunks),
         user_language=prompt_context.user_language,
         retrieval_mode=prompt_context.retrieval_mode,
+        compact_reply=compact,
     )
 
     return reply, prompt_tokens, completion_tokens

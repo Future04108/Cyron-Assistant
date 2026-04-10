@@ -13,10 +13,14 @@ SIMILARITY_HIGH: float = 0.60
 SIMILARITY_MODERATE_FLOOR: float = 0.28
 # Minimum score to return candidates from vector search (below → no KB injection).
 MIN_SIMILARITY_RETRIEVAL: float = 0.30
-COMPACT_STRONG_MATCH: float = 0.65
-COMPACT_HIGH_MATCH: float = 0.60
-COMPACT_MAX_QUERY_WORDS: int = 20
-COMPACT_MAX_QUERY_CHARS: int = 140
+# v2.2 aggressive compact path — trigger more often, earlier.
+COMPACT_STRONG_MATCH: float = 0.62
+COMPACT_HIGH_MATCH: float = 0.55
+COMPACT_EARLY_EXIT_SIM: float = 0.58
+COMPACT_MAX_QUERY_WORDS: int = 25
+COMPACT_MAX_QUERY_CHARS: int = 180
+# Redis cache for short-query replies (seconds).
+COMPACT_CACHE_TTL_SEC: int = 604_800  # 7 days
 
 
 class BackendConfig:
