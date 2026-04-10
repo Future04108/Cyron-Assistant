@@ -173,7 +173,35 @@ def _truncate(value: str | None, limit: int) -> str | None:
     return value[:limit].strip()
 
 
-def build_injection_chunk(knowledge: Knowledge, query: str) -> dict[str, str]:
+def _compress_for_query(text: str, query: str, limit: int = 300) -> str:
+    src = (text or "").strip()
+    if not src:
+        return ""
+    if len(src) <= limit:
+        return src
+    q_terms = {t.lower() for t in re.findall(r"\w+", query or "") if len(t) >= 3}
+    parts = re.split(r"(?<=[.!?])\s+|\n+", src)
+    ranked: list[tuple[int, str]] = []
+    for p in parts:
+        s = p.strip()
+        if not s:
+            continue
+        p_terms = {t.lower() for t in re.findall(r"\w+", s)}
+        score = len(q_terms.intersection(p_terms))
+        ranked.append((score, s))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    out = " ".join(x[1] for x in ranked[:2]).strip()
+    if not out:
+        out = src[:limit]
+    return out[:limit].strip()
+
+
+def build_injection_chunk(
+    knowledge: Knowledge,
+    query: str,
+    *,
+    compact: bool = False,
+) -> dict[str, str]:
     """Build minimal retrieval chunk with relevance-aware optional fields."""
     tp = knowledge.template_payload if isinstance(knowledge.template_payload, dict) else None
     if (knowledge.template_type or "") == "problem_solution" and tp:
@@ -196,16 +224,27 @@ def build_injection_chunk(knowledge: Knowledge, query: str) -> dict[str, str]:
         additional_context = (knowledge.additional_context or parsed_additional or "").strip()
         behavior_notes = (knowledge.behavior_notes or parsed_notes or "").strip()
 
+    if compact:
+        main_content = _compress_for_query(main_content, query, limit=300)
+        additional_context = _compress_for_query(additional_context, query, limit=140)
+        behavior_notes = _compress_for_query(behavior_notes, query, limit=100)
+
     chunk: dict[str, str] = {
         "title": knowledge.title,
-        "main_content": _truncate(main_content, MAX_MAIN_CONTENT_CHARS) or "",
+        "main_content": _truncate(
+            main_content,
+            320 if compact else MAX_MAIN_CONTENT_CHARS,
+        )
+        or "",
     }
-    if additional_context:
+    if additional_context and not compact:
         chunk["additional_context"] = _truncate(
             additional_context, MAX_ADDITIONAL_CONTEXT_CHARS
         ) or ""
-    if behavior_notes:
+    if behavior_notes and not compact:
         chunk["behavior_notes"] = _truncate(behavior_notes, MAX_BEHAVIOR_NOTES_CHARS) or ""
+    if compact and additional_context:
+        chunk["additional_context"] = _truncate(additional_context, 140) or ""
     return chunk
 
 

@@ -9,10 +9,19 @@ from backend.schemas.relay import PromptContext
 
 RetrievalMode = Literal["none", "moderate", "high"]
 
-CONVERSATIONAL_TONE = (
-    "Be natural, friendly, and conversational like a skilled support agent who genuinely wants to help. "
-    "Use warm, clear language—relaxed but professional. Avoid stiff formulas, boilerplate, or filler. "
-    "Stay strictly grounded in the passages you are given; never invent facts."
+COMPACT_RULES = (
+    "Use only provided knowledge for facts. "
+    "Reply in the same language as the user ({lang}). "
+    "Keep it short and direct for Discord (1-2 sentences when enough). "
+    "No invented details, no mention of sources/search."
+)
+
+STANDARD_TONE = (
+    "Be natural, warm, and conversational. "
+    "Ground factual claims only in the provided passages. "
+    "Reply in the user's language ({lang}). "
+    "Keep answers concise for Discord; avoid unnecessary explanations. "
+    "Do not invent policies, prices, delivery details, or account actions."
 )
 
 
@@ -26,52 +35,43 @@ def _tier_from_similarity(top_similarity: float, has_chunks: bool) -> RetrievalM
     return "moderate"
 
 
-def _knowledge_suffix(user_language: str, mode: RetrievalMode) -> str:
-    base_tone = (
-        f"{CONVERSATIONAL_TONE} "
-        f"Respond entirely in the same language as the user's message (language hint: {user_language}). "
-        "For multilingual users, sound natural in that language—do not sound translated or stiff. "
-        "Write like a real teammate: flowing sentences, not bullet lists unless the user asks. "
-        "Ground every factual claim in the knowledge passages below. "
-        "You may combine facts, apply obvious arithmetic from stated numbers, and draw careful "
-        "inferences clearly supported by the text. "
-        "Do not invent policies, prices, or features not stated or clearly implied. "
-        "Never promise emails, refunds, delivery dates, or account actions unless explicitly written in the excerpts. "
-        "Never say 'knowledge base', 'search', 'database', or 'according to my sources' to the user. "
-        "Do not use external or web knowledge."
-    )
+def build_compact_prompt(base_prompt: str, user_language: str) -> str:
+    base = (base_prompt or "").strip()
+    compact = COMPACT_RULES.format(lang=user_language)
+    if base:
+        return f"{base}\n\n{compact}"
+    return compact
+
+
+def build_standard_prompt(base_prompt: str, user_language: str, mode: RetrievalMode) -> str:
+    base_tone = STANDARD_TONE.format(lang=user_language)
+    prefix = (base_prompt or "").strip()
     if mode == "high":
-        return (
+        suffix = (
             f"{base_tone} "
-            "Prioritize main_content first; then additional_context and behavior_notes when relevant. "
-            "Keep answers short for Discord: prefer 2–4 sentences unless the user asks for detail. "
-            "For prices and tiers, quote values from the text; if missing, say so briefly."
+            "Use main_content first, then additional_context/behavior_notes if relevant. "
+            "For prices/tier values, quote only stated numbers."
         )
+        return f"{prefix}\n\n{suffix}" if prefix else suffix
     if mode == "moderate":
-        return (
+        suffix = (
             f"{base_tone} "
-            "MATCH QUALITY: The link between the question and the passages is good but not perfect—"
-            "the user may have worded things differently or the topic may be adjacent. "
-            "First, briefly acknowledge what they are trying to do or find out (one short phrase or sentence, "
-            "in their language—e.g. that you understand they are asking about X). "
-            "Then answer from main_content first, weaving in additional_context or behavior_notes only when helpful. "
-            "You may ease into the answer with a natural line (in their language) such as a soft "
-            "'Here's what I can tell you' or 'From what we have documented'—avoid stiff English idioms if "
-            "the user is not writing in English. "
-            "If something is only partly covered, say so in a friendly way and give what you can; "
-            "offer to clarify or escalate only if the passages truly do not address their goal."
+            "The match is good but not perfect; acknowledge intent briefly, then answer with available facts. "
+            "If partial coverage, state that briefly and offer concise clarification."
         )
-    return base_tone
+        return f"{prefix}\n\n{suffix}" if prefix else suffix
+    return f"{prefix}\n\n{base_tone}" if prefix else base_tone
 
 
 def _knowledge_system_prompt(
-    base_prompt: str, user_language: str, mode: RetrievalMode
+    base_prompt: str,
+    user_language: str,
+    mode: RetrievalMode,
+    compact_reply: bool = False,
 ) -> str:
-    base = (base_prompt or "").strip()
-    suffix = _knowledge_suffix(user_language, mode)
-    if base:
-        return f"{base}\n\n{suffix}"
-    return suffix
+    if compact_reply:
+        return build_compact_prompt(base_prompt, user_language)
+    return build_standard_prompt(base_prompt, user_language, mode)
 
 
 class BuiltPromptContext(TypedDict):
@@ -89,7 +89,8 @@ def build_prompt_context(
     top_similarity: float,
     user_language: str = "en",
     min_confidence: float = MIN_SIMILARITY_THRESHOLD,
-    max_chars: int = 3_000,
+    max_chars: int = 2_400,
+    compact_reply: bool = False,
 ) -> BuiltPromptContext:
     """
     Tiers: high (>= SIMILARITY_HIGH), moderate ([SIMILARITY_MODERATE_FLOOR, high)), none below floor or empty.
@@ -105,7 +106,10 @@ def build_prompt_context(
 
     selected_chunks: list[dict[str, Any]] = []
     total_chars = 0
+    max_chunks = 2 if compact_reply else 4
     for chunk in knowledge_chunks:
+        if len(selected_chunks) >= max_chunks:
+            break
         clen = _chunk_len(chunk)
         if total_chars + clen > max_chars and selected_chunks:
             break
@@ -121,11 +125,17 @@ def build_prompt_context(
     injected = sum(_chunk_len(c) for c in selected_chunks)
 
     prompt_context = PromptContext(
-        system_prompt=_knowledge_system_prompt(system_prompt, user_language, mode),
+        system_prompt=_knowledge_system_prompt(
+            system_prompt,
+            user_language,
+            mode,
+            compact_reply=compact_reply,
+        ),
         knowledge_chunks=selected_chunks,
         message_history=history,
         user_language=user_language,
         retrieval_mode=mode,
+        compact_reply=compact_reply,
     )
 
     return BuiltPromptContext(

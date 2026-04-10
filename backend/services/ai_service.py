@@ -304,7 +304,7 @@ async def get_ai_response(
     mode = getattr(prompt_context, "retrieval_mode", None) or "high"
     temp = 0.32 if mode == "moderate" else 0.26
     compact = bool(getattr(prompt_context, "compact_reply", False))
-    cap = min(115, max_tokens) if compact else min(250, max_tokens)
+    cap = min(130, max_tokens) if compact else min(250, max_tokens)
 
     try:
         response = await acompletion(

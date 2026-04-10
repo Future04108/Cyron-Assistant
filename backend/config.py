@@ -13,6 +13,10 @@ SIMILARITY_HIGH: float = 0.60
 SIMILARITY_MODERATE_FLOOR: float = 0.28
 # Minimum score to return candidates from vector search (below → no KB injection).
 MIN_SIMILARITY_RETRIEVAL: float = 0.30
+COMPACT_STRONG_MATCH: float = 0.65
+COMPACT_HIGH_MATCH: float = 0.60
+COMPACT_MAX_QUERY_WORDS: int = 20
+COMPACT_MAX_QUERY_CHARS: int = 140
 
 
 class BackendConfig:
